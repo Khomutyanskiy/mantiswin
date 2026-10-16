@@ -1,0 +1,16 @@
+{
+  "name": "mantis-windows",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Mantis для Windows: окно Tauri + встроенный агент (страница, нейросеть, мост IP-камер)",
+  "type": "module",
+  "scripts": {
+    "agent": "node scripts/build-agent.mjs",
+    "icons": "tauri icon src-tauri/icons/icon.png",
+    "dev": "node scripts/build-agent.mjs --host && tauri dev",
+    "build": "node scripts/build-agent.mjs && tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.3"
+  }
+}

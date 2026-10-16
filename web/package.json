@@ -1,0 +1,31 @@
+{
+  "name": "mantis-web",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Mantis в браузере: проверка подсчёта посетителей витрины на своём видео",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "serve": "node bridge/serve.mjs",
+    "agent": "bash agent/build.sh"
+  },
+  "dependencies": {
+    "@fontsource-variable/onest": "5.3.1",
+    "@fontsource/jetbrains-mono": "5.3.0",
+    "firebase": "12.19.0",
+    "onnxruntime-web": "1.30.0"
+  },
+  "devDependencies": {
+    "bun": "1.4.2",
+    "typescript": "6.0.3",
+    "vite": "8.3.1",
+    "vitest": "5.0.2"
+  },
+  "optionalDependencies": {
+    "ffmpeg-static": "5.3.0"
+  }
+}

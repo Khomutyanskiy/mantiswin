@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0b1330" />
+    <title>Mantis — аналитика витрины</title>
+    <meta name="description" content="Сколько людей прошло мимо витрины, притормозило, посмотрело и зашло. Анализ вашего видео прямо в браузере — видео никуда не отправляется." />
+    <link rel="icon" type="image/png" href="./favicon.png" />
+    <link rel="apple-touch-icon" href="./icon-192.png" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="./" aria-label="Mantis — в начало">
+        <img src="./icon-192.png" alt="" width="36" height="36" />
+        <span class="brand-name">Mantis</span>
+        <span class="brand-sub">аналитика витрины</span>
+      </a>
+      <nav class="tabs" aria-label="Режим">
+        <button type="button" class="tab" data-tab="check" aria-current="page">Проверка видео</button>
+        <button type="button" class="tab" data-tab="pilot">Пилот</button>
+        <button type="button" class="tab" data-tab="stats">Статистика</button>
+      </nav>
+      <div class="top-right">
+        <div class="engine" id="engine" data-state="idle" title="Нейросеть">
+          <span class="dot" aria-hidden="true"></span><span id="engine-text">Нейросеть не загружена</span>
+        </div>
+        <button class="account-btn" id="btn-account" type="button"><span class="avatar" aria-hidden="true"></span><span id="account-label">Войти</span></button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <!-- Сцена: видео, разметка, наложение -->
+      <section class="stage-wrap" aria-label="Видео">
+        <div class="stage" id="stage">
+          <span class="corner tl" aria-hidden="true"></span><span class="corner tr" aria-hidden="true"></span>
+          <span class="corner bl" aria-hidden="true"></span><span class="corner br" aria-hidden="true"></span>
+
+          <div class="drop" id="drop">
+            <div class="drop-inner">
+              <h1>Проверьте свою витрину за пару минут</h1>
+              <p class="lead">Перетащите сюда видео с телефона, снятое у витрины или у входа. Mantis посчитает, сколько людей прошло мимо, притормозило, посмотрело и зашло.</p>
+              <div class="drop-actions">
+                <label class="btn primary" for="file">Выбрать видео</label>
+                <input id="file" type="file" accept="video/*" hidden />
+                <button class="btn" id="btn-camera" type="button">Включить камеру</button>
+                <button class="btn" id="btn-ipcam" type="button">IP-камера</button>
+              </div>
+              <p class="privacy">Видео обрабатывается на этом компьютере и никуда не отправляется.</p>
+            </div>
+          </div>
+
+          <div class="drop" id="pilot-intro" hidden>
+            <div class="drop-inner">
+              <h1>Пилот: неделя реальных цифр с вашей точки</h1>
+              <p class="lead">Поставьте ноутбук или мини-ПК с камерой у витрины и оставьте на несколько дней. Mantis считает людей круглосуточно и раскладывает итоги по часам. Статистика сохраняется в облаке и видна здесь и в приложении на iPhone.</p>
+              <ol class="intro-steps">
+                <li>Войдите в аккаунт Mantis. Если аккаунта нет, зарегистрируйтесь — это минута.</li>
+                <li>Выберите камеру и разметьте кадр: где зона витрины, линия прохода и вход.</li>
+                <li>Запустите пилот и не закрывайте вкладку. Ноутбук держите на зарядке.</li>
+              </ol>
+              <p class="privacy">Видео не записывается и никуда не уходит. В облако попадают только цифры по часам.</p>
+            </div>
+          </div>
+
+          <canvas id="canvas" hidden></canvas>
+          <div class="stage-msg" id="stage-msg" hidden></div>
+        </div>
+
+        <div class="timeline" id="timeline" hidden>
+          <button class="icon-btn" id="btn-play" type="button" aria-label="Воспроизвести">▶</button>
+          <input id="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="Позиция в видео" />
+          <span class="time mono" id="time">0:00 / 0:00</span>
+        </div>
+
+        <div class="legend" id="legend" hidden>
+          <span><i class="sw gray"></i>в кадре</span>
+          <span><i class="sw white"></i>прошёл линию</span>
+          <span><i class="sw green"></i>притормозил</span>
+          <span><i class="sw yellow"></i>посмотрел</span>
+          <span><i class="sw ring"></i>смотрит сейчас</span>
+        </div>
+      </section>
+
+      <!-- Панель: шаги, настройки, счётчики -->
+      <aside class="panel" id="panel">
+        <!-- Шаг 0: подсказки -->
+        <div class="step" data-step="source">
+          <p class="eyebrow">Как снимать</p>
+          <ol class="tips">
+            <li><b>Камера в витрине</b> на уровне 1,8–2,5 м, смотрит на прохожих. Так лучше всего видно, кто посмотрел.</li>
+            <li><b>2–5 минут</b> обычного потока. Телефон держите неподвижно, лучше на подставке.</li>
+            <li><b>Лица крупнее 40 px</b>. Если люди далеко и мелкие, «посмотрел» будет занижен.</li>
+          </ol>
+          <p class="note">Подойдёт MP4 или MOV с iPhone и Android. Можно проверить и без видео: включите камеру ноутбука и пройдите перед ней.</p>
+        </div>
+
+        <!-- Шаг 1: разметка -->
+        <div class="step" data-step="markup" hidden>
+          <p class="eyebrow">Разметка кадра</p>
+          <p class="hint">Перетаскивайте точки прямо на кадре.</p>
+
+          <div id="check-camera-field" hidden>
+            <label class="field-label" for="check-camera">Камера</label>
+            <select id="check-camera" class="select"></select>
+          </div>
+
+          <fieldset class="field">
+            <legend>Где витрина</legend>
+            <div class="seg" role="radiogroup" id="direction">
+              <label><input type="radio" name="dir" value="camera" checked /><span>Камера в витрине</span></label>
+              <label><input type="radio" name="dir" value="left" /><span>Слева в кадре</span></label>
+              <label><input type="radio" name="dir" value="right" /><span>Справа в кадре</span></label>
+            </div>
+          </fieldset>
+
+          <div class="toggles">
+            <div class="toggle-row">
+              <span class="key cyan" aria-hidden="true"></span>
+              <div class="toggle-text"><b>Зона витрины</b><small>Тормозил и смотрел считаются только внутри</small></div>
+              <button class="link" id="zone-reset" type="button">Весь кадр</button>
+            </div>
+            <label class="toggle-row" for="line-on">
+              <span class="key red" aria-hidden="true"></span>
+              <div class="toggle-text"><b>Линия подсчёта</b><small>Пересёк — значит прошёл мимо</small></div>
+              <input type="checkbox" id="line-on" class="switch" checked />
+            </label>
+            <div class="sub-actions" id="line-actions">
+              <button class="chip" type="button" data-line="vertical">Вертикальная</button>
+              <button class="chip" type="button" data-line="horizontal">Горизонтальная</button>
+            </div>
+            <label class="toggle-row" for="entrance-on">
+              <span class="key green dashed" aria-hidden="true"></span>
+              <div class="toggle-text"><b>Вход в магазин</b><small>Линия по порогу двери</small></div>
+              <input type="checkbox" id="entrance-on" class="switch" />
+            </label>
+          </div>
+
+          <details class="advanced">
+            <summary>Пороги</summary>
+            <div class="grid-fields">
+              <label>Медленно, ростов/с<input id="p-speed" type="number" step="0.05" min="0.05" max="2" value="0.30" /></label>
+              <label>Медленно не меньше, с<input id="p-slow" type="number" step="0.5" min="0.5" max="10" value="1" /></label>
+              <label>Или в зоне не меньше, с<input id="p-dwell" type="number" step="1" min="1" max="60" value="8" /></label>
+              <label>Смотрел не меньше, с<input id="p-look" type="number" step="0.1" min="0.1" max="5" value="0.6" /></label>
+              <label>Поворот головы, макс.<input id="p-yaw" type="number" step="0.05" min="0.1" max="1" value="0.35" /></label>
+              <label id="fps-field">Кадров в секунду<input id="p-fps" type="number" step="1" min="5" max="30" value="15" /></label>
+            </div>
+          </details>
+
+          <div class="actions">
+            <button class="btn primary wide" id="btn-start" type="button">Начать анализ</button>
+            <button class="btn ghost wide" id="btn-other" type="button">Другое видео</button>
+          </div>
+        </div>
+
+        <!-- Шаг 2–3: счётчики (во время анализа и в итогах) -->
+        <div class="step" data-step="run" hidden>
+          <div class="run-head">
+            <p class="eyebrow" id="run-title">Анализ</p>
+            <span class="mono small" id="run-stat"></span>
+          </div>
+          <div class="progress" id="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i></i></div>
+
+          <dl class="counters">
+            <div class="counter"><dt>Прошли мимо</dt><dd class="mono" id="c-passed">0</dd><span class="split mono" id="c-split">→ 0 · ← 0</span></div>
+            <div class="counter"><dt>Притормозили</dt><dd class="mono" id="c-slowed">0</dd><span class="rate mono" id="r-slowed"></span></div>
+            <div class="counter"><dt>Посмотрели</dt><dd class="mono" id="c-looked">0</dd><span class="rate mono" id="r-looked"></span></div>
+            <div class="counter" id="counter-entered" hidden><dt>Зашли</dt><dd class="mono" id="c-entered">0</dd><span class="rate mono" id="r-entered"></span></div>
+          </dl>
+
+          <ol class="feed" id="feed" aria-label="События"></ol>
+
+          <div class="actions">
+            <button class="btn wide" id="btn-stop" type="button">Остановить</button>
+          </div>
+          <div class="actions" id="done-actions" hidden>
+            <button class="btn primary wide" id="btn-remark" type="button">Изменить разметку и пересчитать</button>
+            <button class="btn ghost wide" id="btn-new" type="button">Другое видео</button>
+          </div>
+        </div>
+        <!-- Пилот -->
+        <div class="step" data-step="pilot" hidden>
+          <p class="eyebrow">Пилот</p>
+
+          <div class="account-box" id="pilot-account"></div>
+
+          <div id="pilot-setup">
+            <label class="field-label" for="camera-select">Камера</label>
+            <select id="camera-select" class="select"><option value="">Камера по умолчанию</option></select>
+            <button class="btn small" id="btn-pilot-ip" type="button">Найти или подключить IP-камеру</button>
+            <p class="hint-small" id="markup-summary"></p>
+            <div class="actions">
+              <button class="btn primary wide" id="btn-pilot-setup" type="button">Разметить кадр и запустить</button>
+            </div>
+          </div>
+
+          <div class="agent-box" id="agent-box" hidden>
+            <p class="eyebrow">Mantis Агент <span class="mono faint" id="agent-version"></span></p>
+            <label class="toggle-row" for="agent-autostart">
+              <div class="toggle-text"><b>Запускать при входе в систему</b><small>После перезагрузки компьютера пилот продолжится сам</small></div>
+              <input type="checkbox" id="agent-autostart" class="switch" />
+            </label>
+            <button class="link" id="agent-quit" type="button">Выключить агента</button>
+          </div>
+
+          <div id="pilot-live" hidden>
+            <div class="pilot-state" id="pilot-state" data-state="starting">
+              <span class="dot" aria-hidden="true"></span><span id="pilot-state-text">Запускаю…</span>
+            </div>
+            <p class="mono small faint" id="pilot-meta"></p>
+            <div class="warn" id="pilot-hidden-warn" hidden>Вкладка в фоне: браузер может замедлить подсчёт. Держите её открытой на экране.</div>
+
+            <p class="eyebrow">Сегодня</p>
+            <dl class="counters" id="today-counters">
+              <div class="counter"><dt>Людей в зоне</dt><dd class="mono" id="t-people">0</dd><span class="split mono" id="t-hour">за этот час 0</span></div>
+              <div class="counter"><dt>Прошли мимо</dt><dd class="mono" id="t-passed">0</dd><span class="rate mono"></span></div>
+              <div class="counter"><dt>Посмотрели</dt><dd class="mono" id="t-looked">0</dd><span class="rate mono" id="t-looked-r"></span></div>
+              <div class="counter"><dt>Притормозили</dt><dd class="mono" id="t-slowed">0</dd><span class="rate mono" id="t-slowed-r"></span></div>
+              <div class="counter" id="t-entered-card" hidden><dt>Зашли</dt><dd class="mono" id="t-entered">0</dd><span class="rate mono" id="t-entered-r"></span></div>
+            </dl>
+            <p class="mono small faint" id="pilot-sync"></p>
+            <div class="actions">
+              <button class="btn wide" id="btn-fullscreen" type="button">Во весь экран</button>
+              <button class="btn ghost wide" id="btn-pilot-stop" type="button">Остановить пилот</button>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Итоги -->
+      <section class="report" id="report" hidden aria-label="Итоги">
+        <div class="report-head">
+          <h2>Итоги</h2>
+          <div class="exports">
+            <button class="btn small" id="exp-summary" type="button">Сводка JSON</button>
+            <button class="btn small" id="exp-events" type="button">События CSV</button>
+            <button class="btn small" id="exp-tracks" type="button">Люди CSV</button>
+          </div>
+        </div>
+        <p class="report-sub" id="report-sub"></p>
+        <div class="metrics" id="metrics"></div>
+        <details class="events-wrap">
+          <summary>Все события <span class="mono" id="events-count"></span></summary>
+          <div class="table-scroll">
+            <table class="events">
+              <thead><tr><th>Время</th><th>Человек</th><th>Событие</th></tr></thead>
+              <tbody id="events-body"></tbody>
+            </table>
+          </div>
+        </details>
+        <p class="method">Как считается: человек «прошёл», если точка его ног пересекла линию; «притормозил», если в зоне двигался медленнее порога суммарно дольше заданного или долго стоял в зоне; «посмотрел», если лицо было повёрнуто к витрине. Скорость меряется в ростах человека в секунду, поэтому не зависит от расстояния до камеры. Расстояния и скорость в м/с оценены по росту 1,7 м.</p>
+      </section>
+    </main>
+
+    <!-- Статистика -->
+    <section class="stats" id="stats" hidden aria-label="Статистика">
+      <div class="stats-head">
+        <div>
+          <h2>Статистика по часам</h2>
+          <p class="report-sub" id="stats-sub"></p>
+        </div>
+        <div class="stats-controls">
+          <div class="seg compact" role="radiogroup" id="stats-period">
+            <label><input type="radio" name="period" value="7" checked /><span>7 дней</span></label>
+            <label><input type="radio" name="period" value="30" /><span>30 дней</span></label>
+            <label><input type="radio" name="period" value="0" /><span>Всё время</span></label>
+          </div>
+          <button class="btn small" id="btn-stats-refresh" type="button">Обновить</button>
+        </div>
+      </div>
+      <div class="chips" id="stats-metric" role="radiogroup" aria-label="Показатель"></div>
+      <div class="devices" id="devices"></div>
+      <div id="stats-cameras" hidden></div>
+      <div id="stats-body"></div>
+    </section>
+
+    <!-- Пилот на нескольких камерах (настольная версия: Windows) -->
+    <section class="multi" id="multi" hidden aria-label="Пилот"></section>
+
+    <!-- Аккаунт -->
+    <dialog class="dialog" id="account-dialog" aria-labelledby="account-title">
+      <form method="dialog" class="dialog-inner" id="account-form" novalidate>
+        <div class="dialog-head">
+          <h2 id="account-title">Аккаунт Mantis</h2>
+          <button class="icon-btn" value="close" type="submit" formnovalidate aria-label="Закрыть">✕</button>
+        </div>
+        <div id="auth-signed-out">
+          <p class="hint-small">Тот же аккаунт, что в приложении Mantis на iPhone.</p>
+          <label class="field-label" for="auth-email">Почта</label>
+          <input class="input" id="auth-email" type="email" autocomplete="email" />
+          <label class="field-label" for="auth-password">Пароль</label>
+          <input class="input" id="auth-password" type="password" autocomplete="current-password" minlength="6" />
+          <p class="form-error" id="auth-error" hidden></p>
+          <div class="actions">
+            <button class="btn primary wide" id="btn-signin" type="button">Войти</button>
+            <button class="btn wide" id="btn-signup" type="button">Зарегистрироваться</button>
+            <button class="link" id="btn-reset" type="button">Забыли пароль?</button>
+          </div>
+        </div>
+        <div id="auth-signed-in" hidden>
+          <p class="hint-small">Вы вошли как <b id="auth-who"></b></p>
+          <label class="field-label" for="pf-point">Название точки</label>
+          <input class="input" id="pf-point" type="text" placeholder="Например, Пушкинская, 12" />
+          <label class="field-label" for="pf-city">Город</label>
+          <input class="input" id="pf-city" type="text" />
+          <div class="grid-fields">
+            <label>Средний чек, ₽<input id="pf-check" type="number" min="0" step="100" /></label>
+            <label>Часов работы в день<input id="pf-hours" type="number" min="1" max="24" step="1" /></label>
+            <label>Покупают из посмотревших, %<input id="pf-look" type="number" min="0" max="100" step="0.5" /></label>
+            <label>Покупают из вошедших, %<input id="pf-enter" type="number" min="0" max="100" step="1" /></label>
+          </div>
+          <p class="form-error" id="profile-error" hidden></p>
+          <div class="actions">
+            <button class="btn primary wide" id="btn-profile-save" type="button">Сохранить</button>
+            <button class="btn ghost wide" id="btn-signout" type="button">Выйти</button>
+          </div>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- IP-камера -->
+    <dialog class="dialog wide-dialog" id="ip-dialog" aria-labelledby="ip-title">
+      <form method="dialog" class="dialog-inner" novalidate>
+        <div class="dialog-head">
+          <h2 id="ip-title">IP-камера</h2>
+          <button class="icon-btn" value="close" type="submit" formnovalidate aria-label="Закрыть">✕</button>
+        </div>
+
+        <div class="warn" id="ip-nobridge" hidden>
+          Поиск и подключение IP-камер работают, когда Mantis запущен на этом компьютере: <code>npm run dev</code> или <code>npm run serve</code> в папке <code>web</code>.
+          Компьютер и камера должны быть в одной сети.
+        </div>
+        <div class="warn" id="ip-noffmpeg" hidden>
+          Для IP-камер нужен ffmpeg. Выполните <code>npm install</code> в папке <code>web</code> (он скачается сам) или <code>brew install ffmpeg</code>, затем перезапустите Mantis.
+        </div>
+
+        <!-- Поиск -->
+        <section class="ip-section" id="ip-find">
+          <div class="row-between">
+            <p class="eyebrow">Найдено в сети <span class="mono faint" id="ip-subnet"></span></p>
+            <button class="btn small" id="ip-scan" type="button">Найти камеры</button>
+          </div>
+          <ul class="cam-list" id="ip-results"></ul>
+          <p class="hint-small" id="ip-scan-note">Ищем камеры с ONVIF и устройства с открытым портом RTSP. Камеры в другой сети или за VPN не найти — введите адрес вручную.</p>
+        </section>
+
+        <!-- Вход ONVIF -->
+        <section class="ip-section" id="ip-login" hidden>
+          <p class="eyebrow">Вход в камеру</p>
+          <p class="hint-small"><b id="ip-login-title"></b> · <span class="mono" id="ip-login-ip"></span></p>
+          <label class="field-label" for="ip-login-user">Логин</label>
+          <input class="input" id="ip-login-user" type="text" autocomplete="username" value="admin" />
+          <label class="field-label" for="ip-login-pass">Пароль</label>
+          <input class="input" id="ip-login-pass" type="password" autocomplete="current-password" />
+          <p class="hint-small">Логин и пароль, которые задали при установке камеры. Mantis сам получит адрес видеопотока.</p>
+          <div class="actions row">
+            <button class="btn primary" id="ip-login-go" type="button">Получить видеопоток</button>
+            <button class="btn ghost" id="ip-login-back" type="button">Назад</button>
+          </div>
+        </section>
+
+        <!-- Марка для камер без ONVIF -->
+        <section class="ip-section" id="ip-brand" hidden>
+          <p class="eyebrow">Какая это камера?</p>
+          <p class="hint-small"><span class="mono" id="ip-brand-ip"></span> не отвечает по ONVIF. Выберите марку — подставим путь потока, логин и пароль введёте ниже.</p>
+          <div class="chips" id="ip-brand-list"></div>
+          <button class="btn ghost small" id="ip-brand-back" type="button">Назад</button>
+        </section>
+
+        <!-- Подключение -->
+        <section class="ip-section" id="ip-manual">
+          <p class="eyebrow">Подключение</p>
+          <label class="field-label" for="ip-url">Адрес потока</label>
+          <input class="input mono" id="ip-url" type="text" placeholder="rtsp://адрес:554/путь" spellcheck="false" autocomplete="off" />
+          <div class="grid-2">
+            <div>
+              <label class="field-label" for="ip-user">Логин</label>
+              <input class="input" id="ip-user" type="text" autocomplete="off" />
+            </div>
+            <div>
+              <label class="field-label" for="ip-pass">Пароль</label>
+              <input class="input" id="ip-pass" type="password" autocomplete="off" />
+            </div>
+          </div>
+          <details class="advanced">
+            <summary>Примеры адресов</summary>
+            <ul class="examples" id="ip-examples"></ul>
+            <p class="hint-small">Берите дополнительный поток (720p): его хватает для подсчёта и он меньше нагружает компьютер. В камере включите кодек H.264 или H.265.</p>
+          </details>
+          <div class="actions">
+            <button class="btn primary wide" id="ip-connect" type="button">Подключить</button>
+          </div>
+          <p class="hint-small faint">Пароль камеры хранится только в этом браузере и передаётся только Mantis на этом компьютере.</p>
+        </section>
+        <p class="form-error" id="ip-error" hidden></p>
+        <p class="hint-small" id="ip-progress" hidden></p>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
