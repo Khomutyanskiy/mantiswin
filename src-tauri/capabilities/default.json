@@ -12,6 +12,8 @@
     "allow-keep-awake",
     "allow-set-autostart",
     "allow-pilot-state",
-    "allow-quit-app"
+    "allow-quit-app",
+    "allow-notify",
+    "allow-tray-status"
   ]
 }

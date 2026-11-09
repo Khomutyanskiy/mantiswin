@@ -68,6 +68,21 @@ export function hourDelta(prev: Totals, cur: Totals): HourStat | null {
   return d;
 }
 
+/**
+ * Прирост живого подсчёта (как account() в PilotChannel.swift): небольшое уменьшение людей, «посмотрели»
+ * и «притормозили» (до 2) — сняли сотрудника, вычитаем и из статистики по часам; большое — перезапуск счётчиков,
+ * прироста нет. «Прошли» и «зашли» не уменьшаются.
+ */
+export function liveDelta(prev: Totals, cur: Totals): HourStat | null {
+  const staffFix = cur.people >= prev.people - 2 && cur.looked >= prev.looked - 2 && cur.slowed >= prev.slowed - 2
+    && cur.passed >= prev.passed && cur.entered >= prev.entered
+    && (cur.people < prev.people || cur.looked < prev.looked || cur.slowed < prev.slowed);
+  if (!staffFix) return hourDelta(prev, cur);
+  const d = emptyHour();
+  for (const f of FIELDS) d[f] = cur[f] - prev[f];
+  return d;
+}
+
 /** Хранилище часов в браузере (localStorage) + список изменённых часов для отправки в облако. */
 export class HourlyStore {
   hours: Record<string, HourStat> = {};

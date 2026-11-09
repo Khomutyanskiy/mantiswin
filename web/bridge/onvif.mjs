@@ -143,14 +143,27 @@ export async function scanPorts(hosts, ports, timeout = 600) {
   return open;
 }
 
-/** Полный поиск: ONVIF и порты RTSP параллельно, 3–4 секунды. */
-export async function scanCameras({ subnets = localSubnets(), extraTargets = [] } = {}) {
+/** Полный поиск: ONVIF, порты RTSP и телефоны Android с IP Webcam (RTSP на 8080) параллельно, 3–5 секунд. */
+export async function scanCameras({ subnets = localSubnets(), extraTargets = [], androidProbe = null } = {}) {
   const hosts = subnets.flatMap((s) => s.hosts);
-  const [onvif, ports] = await Promise.all([probeOnvif(hosts, { extraTargets }), scanPorts(hosts, [554, 8554])]);
+  const [onvif, ports] = await Promise.all([probeOnvif(hosts, { extraTargets }), scanPorts(hosts, [554, 8554, 8080])]);
+  // 8080 открыт у многих устройств (роутеры, принтеры) — Android с IP Webcam отвечает там по RTSP
+  const android = new Set();
+  if (androidProbe) {
+    const with8080 = [...ports].filter(([, l]) => l.includes(8080)).map(([ip]) => ip);
+    await Promise.all(with8080.map(async (ip) => (await androidProbe(ip)) && android.add(ip)));
+  }
   const byIp = new Map(onvif);
   for (const [ip, list] of ports) {
+    const isAndroid = android.has(ip);
+    const open = list.filter((p) => p !== 8080 || isAndroid);
+    if (!open.length && !byIp.has(ip)) continue;
     const cam = byIp.get(ip) ?? { ip, rtspPorts: [] };
-    cam.rtspPorts = [...list].sort((a, b) => a - b);
+    cam.rtspPorts = [...open].sort((a, b) => a - b);
+    if (isAndroid) {
+      cam.android = true;
+      cam.name ??= "Телефон Android (IP Webcam)";
+    }
     byIp.set(ip, cam);
   }
   const cameras = [...byIp.values()].sort((a, b) => {
@@ -219,16 +232,16 @@ export function httpAuthorization(challenge, method, uri, user, password) {
 
 export class OnvifError extends Error {}
 
-async function soapCall(url, user, password, body) {
+export async function soapCall(url, user, password, body, timeout = 6000) {
   const envelope =
     `<?xml version="1.0" encoding="UTF-8"?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Header>${security(user, password)}</s:Header>` +
     `<s:Body xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">${body}</s:Body></s:Envelope>`;
   const headers = { "Content-Type": "application/soap+xml; charset=utf-8", "User-Agent": "Mantis" };
-  let r = await httpRequest(url, { body: envelope, headers });
+  let r = await httpRequest(url, { body: envelope, headers, timeout });
   if (r.code === 401 && user && r.headers["www-authenticate"]) {
     const u = new URL(url);
     const auth = httpAuthorization(String(r.headers["www-authenticate"]), "POST", u.pathname + u.search, user, password);
-    r = await httpRequest(url, { body: envelope, headers: { ...headers, Authorization: auth } });
+    r = await httpRequest(url, { body: envelope, headers: { ...headers, Authorization: auth }, timeout });
   }
   if (r.code === 401 || /NotAuthorized|FailedAuthentication/.test(r.body)) throw new OnvifError("Неверный логин или пароль камеры");
   if (r.code < 200 || r.code >= 300) {

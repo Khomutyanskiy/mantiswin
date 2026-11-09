@@ -24,7 +24,12 @@ export default defineConfig({
   plugins: [cameraBridge()],
   optimizeDeps: { exclude: ["onnxruntime-web"] },
   worker: { format: "es" },
-  build: { target: "es2022", chunkSizeWarningLimit: 2000 },
+  build: {
+    target: "es2022",
+    chunkSizeWarningLimit: 2000,
+    // две страницы: приложение (index.html) и личный кабинет (cabinet.html)
+    rollupOptions: { input: { main: "index.html", cabinet: "cabinet.html" } },
+  },
   server: {
     // Нужны для многопоточного WASM (SharedArrayBuffer)
     headers: {

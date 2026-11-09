@@ -194,13 +194,24 @@ export class StreamManager {
     const full = withCredentials(url, user, password);
     for (const s of this.streams.values()) {
       if (s.url === full) {
+        // одну камеру могут смотреть несколько мест страницы (пилот, предпросмотр, чувствительность) — считаем их
         s.lastAccess = Date.now();
+        s.refs = (s.refs ?? 1) + 1;
         return s;
       }
     }
     const s = new Stream(ff.path, full, opts);
+    s.refs = 1;
     this.streams.set(s.id, s);
     return s;
+  }
+
+  /** Один из зрителей закрыл поток; ffmpeg останавливается, когда закрыли все. */
+  release(id) {
+    const s = this.streams.get(id);
+    if (!s) return;
+    s.refs = (s.refs ?? 1) - 1;
+    if (s.refs <= 0) this.close(id);
   }
 
   get(id) {

@@ -18,7 +18,7 @@ export const DEFAULT_ENTRANCE: Pt[] = [{ x: 0.2, y: 0.8 }, { x: 0.8, y: 0.8 }];
 
 export const defaultMarkup = (): Markup => ({
   zone: FULL_FRAME.map((p) => ({ ...p })),
-  lineEnabled: true,
+  lineEnabled: false, // по умолчанию линий нет — включаются вручную
   line: VERTICAL_LINE.map((p) => ({ ...p })),
   entranceEnabled: false,
   entrance: DEFAULT_ENTRANCE.map((p) => ({ ...p })),

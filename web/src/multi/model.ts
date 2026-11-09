@@ -8,10 +8,11 @@ import type { Account } from "../cloud/account";
 import { type DeviceCamera, saveDevice } from "../cloud/firebase";
 import type { Detector } from "../detector";
 import { desktopShell, keepAwake, reportPilotRunning } from "../desktop";
+import { prefBool } from "../settings/prefs";
 import type { FrameResult } from "../engine/session";
 import { type HourStat, addHours, emptyHour, hourKey, isEmptyHour } from "../pilot/hours";
 import { CameraHourlyStore } from "./cameraHours";
-import { Channel, type ChannelConfig } from "./channel";
+import { Channel, type ChannelConfig, normalizeChannelConfig } from "./channel";
 
 const KEYS = { channels: "mantis.multi.channels.v1", active: "mantis.multi.active", device: "mantis.deviceId.desktop" };
 
@@ -31,6 +32,15 @@ export function desktopDeviceId(): string {
 
 export type PilotState = "idle" | "counting" | "recovering";
 
+/** Итоги одного запуска мониторинга — для отчёта (как saveReport в PilotModel.swift). */
+export interface RunEnd {
+  started: number;
+  ended: number;
+  /** Прирост запуска по часам (ключ 2026-10-03-14), сброс счётчиков на карточках его не трогает. */
+  hours: Record<string, HourStat>;
+  cameras: { id: string; name: string; entrance: boolean; stat: HourStat }[];
+}
+
 export interface MultiHooks {
   account: Account;
   getDetector: () => Promise<Detector>;
@@ -39,6 +49,10 @@ export interface MultiHooks {
   onFrame: (ch: Channel, shot: ImageBitmap, fr: FrameResult | null) => void;
   /** Что-то поменялось: камеры, состояние, итоги. */
   onChange: () => void;
+  /** Мониторинг запущен (запись двойника, видео). */
+  onRunStart?: () => void;
+  /** Мониторинг остановлен или приложение закрывается — сохранить отчёт запуска. */
+  onRunEnd?: (run: RunEnd, closing: boolean) => void | Promise<void>;
 }
 
 export class MultiPilot {
@@ -54,6 +68,9 @@ export class MultiPilot {
   private lastTick = 0;
   private lastFlush = 0;
   private lastBeatAt = 0;
+  /** Данные текущего запуска для отчёта. */
+  private sessionHours: Record<string, HourStat> = {};
+  private sessionCams: Record<string, HourStat> = {};
 
   constructor(private readonly h: MultiHooks) {
     this.cameraHours = new CameraHourlyStore(desktopDeviceId);
@@ -77,7 +94,7 @@ export class MultiPilot {
   }
 
   get message(): string {
-    if (!this.running) return this.startedAt === null ? "Пилот не запущен" : "Пилот остановлен";
+    if (!this.running) return this.startedAt === null ? "Мониторинг не запущен" : "Мониторинг остановлен";
     const live = this.channels.filter((c) => c.isCounting).length;
     if (this.channels.length === 1) return live === 1 ? "Идёт подсчёт" : this.channels[0].message || "Запуск…";
     return `Идёт подсчёт · считают ${live} из ${this.channels.length} камер`;
@@ -107,7 +124,7 @@ export class MultiPilot {
   private loadConfigs(): ChannelConfig[] {
     try {
       const list = JSON.parse(localStorage.getItem(KEYS.channels) ?? "[]") as ChannelConfig[];
-      return Array.isArray(list) ? list.filter((c) => c && c.id && c.markup) : [];
+      return Array.isArray(list) ? list.filter((c) => c && c.id && c.markup).map(normalizeChannelConfig) : [];
     } catch {
       return [];
     }
@@ -137,7 +154,11 @@ export class MultiPilot {
           await ch.stopPreview();
           void ch.startPreview();
         }
-      } else if (this.running) ch.restart();
+      } else if (this.running) {
+        // новые пороги — новый кусок подсчёта; одно переименование или псевдоним подсчёт не трогают
+        const key = (c: ChannelConfig) => JSON.stringify([c.markup, c.direction, c.filter]);
+        if (key(old) !== key(config)) ch.restart();
+      }
     } else {
       const n = this.makeChannel(config);
       this.channels.push(n);
@@ -145,6 +166,18 @@ export class MultiPilot {
       else if (this.previewOn) void n.startPreview();
     }
     this.cameraHours.add(config.id, channelName(config), emptyHour());
+    this.saveConfigs();
+    this.h.onChange();
+  }
+
+  /** Поменять две камеры местами (перетаскивание карточек). Цвета закрепляются, чтобы не поменялись вместе с порядком. */
+  swap(a: string, b: string): void {
+    const i = this.channels.findIndex((c) => c.id === a), j = this.channels.findIndex((c) => c.id === b);
+    if (i < 0 || j < 0 || i === j) return;
+    this.channels.forEach((c, k) => {
+      if (c.config.color == null) c.config = { ...c.config, color: k % 8 };
+    });
+    [this.channels[i], this.channels[j]] = [this.channels[j], this.channels[i]];
     this.saveConfigs();
     this.h.onChange();
   }
@@ -190,9 +223,16 @@ export class MultiPilot {
       /* нет */
     }
     reportPilotRunning(true);
-    void keepAwake(true);
+    void keepAwake(true, prefBool("monitor.screenOn", true));
     this.startedAt = Date.now();
     this.totals = emptyHour();
+    this.sessionHours = {};
+    this.sessionCams = {};
+    try {
+      this.h.onRunStart?.();
+    } catch (e) {
+      console.warn("[mantis] запуск мониторинга:", e);
+    }
     const fps = this.perCameraFps;
     for (const c of this.channels) await c.start(fps);
     this.lastTick = this.lastFlush = this.lastBeatAt = performance.now();
@@ -212,6 +252,7 @@ export class MultiPilot {
     }
     await Promise.all(this.channels.map((c) => c.stop()));
     this.collect(0);
+    await this.finishRun(false);
     await this.flush();
     await this.heartbeat(false);
     void keepAwake(false);
@@ -224,8 +265,36 @@ export class MultiPilot {
   prepareForUnload(): void {
     if (!this.running) return;
     this.collect(0);
+    void this.finishRun(true);
     this.h.account.hours.save();
     void this.cameraHours.flush(null);
+  }
+
+  /** Итоги запуска → отчёт. После перезапуска приложения мониторинг продолжится новым запуском. */
+  private async finishRun(closing: boolean): Promise<void> {
+    const started = this.startedAt ?? Date.now();
+    const run: RunEnd = {
+      started, ended: Date.now(), hours: this.sessionHours,
+      cameras: this.channels.map((c) => ({
+        id: c.id, name: c.title, entrance: !!c.config.markup.entranceEnabled, stat: this.sessionCams[c.id] ?? emptyHour(),
+      })),
+    };
+    this.sessionHours = {};
+    this.sessionCams = {};
+    try {
+      await this.h.onRunEnd?.(run, closing);
+    } catch (e) {
+      console.warn("[mantis] отчёт запуска не сохранился:", e);
+    }
+  }
+
+  private addSession(d: HourStat, camera?: string): void {
+    if (isEmptyHour(d)) return;
+    if (camera) this.sessionCams[camera] = addHours(this.sessionCams[camera] ?? emptyHour(), d);
+    else {
+      const k = hourKey(new Date());
+      this.sessionHours[k] = addHours(this.sessionHours[k] ?? emptyHour(), d);
+    }
   }
 
   // ---------------------------------------------------------------- цикл раз в секунду
@@ -256,10 +325,12 @@ export class MultiPilot {
       // у каждой камеры — своё время наблюдения
       const cd = { ...d, seconds: c.isLive ? sec : 0 };
       this.cameraHours.add(c.id, c.title, cd);
+      this.addSession(cd, c.id);
     }
     // общее время наблюдения идёт, пока хоть одна камера видит кадры
     if (this.channels.some((c) => c.isLive)) delta.seconds = sec;
     if (!isEmptyHour(delta)) this.h.account.hours.add(delta);
+    this.addSession(delta);
     this.totals = addHours(this.totals, delta);
   }
 
@@ -268,6 +339,8 @@ export class MultiPilot {
     if (!d || isEmptyHour(d)) return;
     this.h.account.hours.add(d);
     this.cameraHours.add(ch.id, ch.title, d);
+    this.addSession(d, ch.id);
+    this.addSession(d);
     this.totals = addHours(this.totals, d);
   }
 
@@ -303,10 +376,10 @@ export class MultiPilot {
         saveDevice(
           uid, desktopDeviceId(),
           {
-            name: `Mantis · ${this.h.hostname() || "Windows"}`, point: p.point || p.name, status: counting ? "counting" : "stopped",
+            name: `Mantis · ${this.h.hostname() || (desktopShell ? "Windows" : "браузер")}`, point: p.point || p.name, status: counting ? "counting" : "stopped",
             fps: Math.round(this.fps * 10) / 10, startedAt: this.startedAt, today: this.today(),
           },
-          { platform: desktopShell ?? "desktop", cameras },
+          { platform: desktopShell ?? "web", cameras },
         ),
         new Promise((r) => setTimeout(r, 10_000)),
       ]);

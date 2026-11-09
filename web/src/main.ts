@@ -22,9 +22,40 @@ import type { Metric } from "./pilot/business";
 import { type CameraSeries, renderCameraTable, renderDevices, renderMetricChips, renderStats } from "./ui/stats";
 import { type LiveSource, loadIpCamera, openIpCamera, openWebcam, saveIpCamera } from "./sources";
 import { chooseIpCamera } from "./ui/ipcam";
-import { isDesktop } from "./desktop";
+import { desktopShell, isDesktop } from "./desktop";
 import { MultiPilot } from "./multi/model";
+import { newChannelConfig } from "./multi/channel";
+import { type TwinView, mountTwin } from "./twin/view";
+import { mountRecords } from "./twin/records";
+import { mountMonitoring } from "./monitoring";
+import { mountDemo } from "./demo";
+import { mountCabinet } from "./cabinet/view";
+import { keepAwake } from "./ui/wakelock";
+import { TwinPublisher } from "./cloud/twinPublisher";
+import { mountHelp, setNavigator } from "./ui/help";
+import { mountAbout } from "./ui/about";
+import { calibrationValid, floorPointsUntouched } from "./twin/plan";
 import { type MultiView, mountMulti } from "./multi/view";
+import { reports } from "./reports/store";
+import { type DetailOptions, type ReportsCtx, lastReport as lastRunReport, mountReportsList, renderReportDetail } from "./reports/view";
+import { renderCompare } from "./reports/compare";
+import { download, hoursCsv, stamp as dayStamp } from "./reports/csv";
+import { rowsFor, showcaseScore } from "./pilot/business";
+import { deleteRecording, listRecordings, saveRecording } from "./twin/store";
+import { channelColorIndex, channelShort } from "./multi/channel";
+import type { RunEnd } from "./multi/model";
+import { newReport, type ReportSummary as RunReport } from "./reports/store";
+import { VideoStorage } from "./video/storage";
+import { VideoRun } from "./video/run";
+import { CameraAlerts } from "./pilot/alerts";
+import { scheduleText, startSchedule, stoppedManually, schedulePrefs } from "./pilot/schedule";
+import { onTrayCommand, trayStatus } from "./desktop";
+import { applyAppearance, mountSettings } from "./settings/view";
+import { openHeatmap } from "./video/heatmap";
+import { mountTipBar } from "./settings/tips";
+import { SAMPLE_CAMERAS, sample } from "./settings/sample";
+
+applyAppearance();
 
 // ---------------------------------------------------------------- элементы
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) => document.querySelector<T>(sel)!;
@@ -105,7 +136,7 @@ function applySaved(m: Mode): void {
 }
 
 // ---------------------------------------------------------------- состояние
-type Source = { kind: "file"; video: HTMLVideoElement; name: string; url: string } | { kind: "live"; live: LiveSource };
+type Source = { kind: "file"; video: HTMLVideoElement; name: string; url: string; file: File } | { kind: "live"; live: LiveSource };
 /** Значение в списке камер пилота, означающее сохранённую IP-камеру. */
 const IP_OPTION = "ip";
 let source: Source | null = null;
@@ -115,7 +146,7 @@ let detectorLoading: Promise<Detector> | null = null;
 let running = false;
 let stopRequested = false;
 let previewRaf = 0;
-type Tab = "check" | "pilot" | "stats";
+type Tab = "help" | "check" | "monitoring" | "demo" | "sites" | "stats" | "records" | "about" | "settings";
 let currentTab: Tab = "check";
 let pilot: PilotRunner | null = null;
 let pilotStatus: PilotStatus | null = null;
@@ -188,7 +219,7 @@ async function openFile(file: File): Promise<void> {
     toast("Браузер не смог открыть это видео. Откройте страницу в Chrome или Safari либо перекодируйте ролик в MP4 (H.264).", true);
     return;
   }
-  source = { kind: "file", video, name: file.name, url };
+  source = { kind: "file", video, name: file.name, url, file };
   await seekTo(video, Math.min(0.5, (video.duration || 1) / 4));
   message(null);
   enterMarkup();
@@ -587,7 +618,7 @@ async function startAnalysis(): Promise<void> {
       session = new Session(cfg, W, H, entrance, fps);
       await runFile(det, session, src.video, fps);
     } else {
-      session = new Session(cfg, W, H, entrance, 15);
+      session = new Session(cfg, W, H, entrance, 15, { reid: true, staffMinutes: 10, seenAfter: cfg.tracking.minTrackSeconds });
       await runCamera(det, session, src.live);
     }
     report = session.finish();
@@ -611,6 +642,19 @@ async function startAnalysis(): Promise<void> {
     live: src.kind === "live",
     numberOf,
   };
+  // итог — в «Отчёты» (и в облако, если вошли), как ResultView / CameraView на Mac
+  {
+    const c = report.counters, m = report.metrics;
+    const people = report.tracks.filter((t) => t.everInZone).length;
+    const sc = showcaseScore(people, c.looked, c.slowed, m.stopped ?? 0, m.approached ?? 0, report.entered ?? null);
+    if (src.kind === "file" || people > 0) {
+      reports.add(newReport({
+        source: src.kind === "file" ? "video" : "camera", title: src.kind === "file" ? `Видео · ${src.name}` : "Камера",
+        duration: report.seconds, people, passed: c.passed, slowed: c.slowed, looked: c.looked, stopped: m.stopped ?? 0,
+        approached: m.approached ?? 0, entered: report.entered ?? undefined, score: sc?.value,
+      }));
+    }
+  }
   finishUi();
 }
 
@@ -684,6 +728,8 @@ function finishUi(): void {
   setCounters({ counters: r.counters, entered: r.entered ?? 0 }, r.entered !== null);
   $("#btn-stop").parentElement!.hidden = true;
   $("#done-actions").hidden = false;
+  $("#btn-twin").hidden = !(source.kind === "file" && frames.length);
+  $("#btn-heat").hidden = !(source.kind === "file" && frames.length);
   renderReport(reportEl, lastReport);
   reportEl.hidden = false;
   if (source.kind === "file" && frames.length) {
@@ -783,6 +829,20 @@ const goHome = () => {
 };
 $("#btn-other").addEventListener("click", () => (mode === "pilot" ? pilotHome() : goHome()));
 $("#btn-new").addEventListener("click", goHome);
+$("#btn-twin").addEventListener("click", () => {
+  if (source?.kind !== "file" || !frames.length) return;
+  const src = source;
+  const w = src.video.videoWidth, h = src.video.videoHeight;
+  const fr = frames.map((f) => ({ t: f.t, boxes: f.boxes }));
+  switchTab("monitoring");
+  monitoring.go("monitor");
+  void twin.openVideo(src.file, { width: w, height: h, frames: fr });
+});
+
+$("#btn-heat").addEventListener("click", () => {
+  if (source?.kind !== "file" || !frames.length) return;
+  void openHeatmap({ frames, video: source.video, width: source.video.videoWidth, height: source.video.videoHeight, title: source.file.name.replace(/\.[^.]+$/, "") });
+});
 
 const stamp = () => new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
 $("#exp-summary").addEventListener("click", () => lastReport && exportSummary(lastReport, stamp()));
@@ -889,7 +949,8 @@ $("#btn-profile-save").addEventListener("click", () => {
 account.subscribe((st) => {
   const u = st.user;
   accountBtn.classList.toggle("signed", !!u);
-  $("#account-label").textContent = u ? (st.profile.point || u.email || "Аккаунт") : "Войти";
+  $("#account-label").textContent = "Профиль";
+  accountBtn.title = u ? `Профиль · ${st.profile.point || u.email || ""}` : "Профиль · вход не выполнен";
   accountBtn.querySelector(".avatar")!.textContent = u?.email?.[0] ?? "";
   $("#auth-signed-out").hidden = !!u;
   $("#auth-signed-in").hidden = !u;
@@ -899,12 +960,293 @@ account.subscribe((st) => {
   if (currentTab === "stats") renderStatsView();
 });
 
-// ================================================================ пилот на нескольких камерах (настольная версия)
-// В приложении для Windows вкладка «Пилот» — сетка камер, как в Mantis для Mac. В браузере — пилот на одну камеру ниже.
-const multi: MultiView | null = isDesktop
-  ? mountMulti($("#multi"), { account, getDetector: ensureDetector, resetDetector, toast, openAccount: () => accountBtn.click() })
-  : null;
+// ================================================================ пилот на нескольких камерах
+// Вкладка «Пилот» — сетка камер, как в Mantis для Mac: в браузере, у Mantis Агента и в приложении для Windows.
+// (Старый пилот на одну камеру ниже остаётся как запасной код; его настройки переносятся в первую камеру.)
+let twinRef: TwinView | null = null;
+const multi: MultiView | null = mountMulti($("#multi"), {
+  account, getDetector: ensureDetector, resetDetector, toast, openAccount: () => accountBtn.click(),
+  onSetup: (ch) => void twinRef?.setupCamera(ch),
+  onRunStart: () => {
+    startRunTwin();
+    cameraAlerts.begin();
+    void videoRun.start(multi!.model.channels);
+  },
+  onRunEnd: (run, closing) => saveRunReport(run, closing),
+  bindingText: (ch) => {
+    // двойник создаётся сразу после сетки камер — до этого привязок ещё нет
+    const c = twinRef?.model.plan.calibrations[ch.id];
+    if (!c || !calibrationValid(c)) return { text: "не привязана к плану", ok: false };
+    if (floorPointsUntouched(c)) return { text: "по полу: точки не расставлены", ok: false };
+    return { text: c.mode === "sector" ? "на плане по сектору" : "на плане по полу", ok: true };
+  },
+});
 if (isDesktop) document.body.classList.add("desktop");
+migrateSinglePilot();
+
+// ================================================================ цифровой двойник и записи (как в Mantis для Mac)
+const records = mountRecords($("#records"));
+const twin = mountTwin($("#twin"), {
+  multi: multi!,
+  getDetector: ensureDetector,
+  toast,
+  goCameras: () => monitoring.go("cameras"),
+  goPlan: () => monitoring.go("plan"),
+  goStats: () => switchTab("stats"),
+  signedIn: () => !!account.state.user,
+  onSaved: () => records.reload(),
+  videoConfig: () => {
+    // разметка вкладки «Проверка видео», но зона — весь кадр: на плане нужны все люди
+    const saved = loadSaved("check");
+    const m = saved.markup?.zone?.length === 4 && saved.markup.line?.length === 2 ? saved.markup : defaultMarkup();
+    const c = defaultConfig();
+    c.countLineEnabled = m.lineEnabled;
+    c.countLine = m.line.map((q) => ({ ...q }));
+    c.showcaseZone = FULL_FRAME.map((q) => ({ ...q }));
+    c.look.showcaseDirection = saved.direction ?? "camera";
+    return { cfg: c, entrance: m.entranceEnabled ? m.entrance : null, fps: 15 };
+  },
+});
+
+twinRef = twin;
+
+/** Блок «Цифровой двойник в облаке» в окне профиля. */
+function mountTwinCloud(pub: TwinPublisher): void {
+  const en = $<HTMLInputElement>("#tc-enabled");
+  const site = $<HTMLInputElement>("#tc-site");
+  en.checked = pub.enabled;
+  site.value = pub.siteId === "main" ? "" : pub.siteId;
+  en.addEventListener("change", () => (pub.enabled = en.checked));
+  site.addEventListener("change", () => {
+    pub.siteId = site.value;
+    site.value = pub.siteId === "main" ? "" : pub.siteId;
+  });
+  pub.subscribe((st) => {
+    const dot = $("#tc-dot");
+    dot.dataset.state = st.kind;
+    $("#tc-status").textContent = st.kind === "off" ? "Выключено"
+      : st.kind === "signedOut" ? "Войдите — данные привязываются к аккаунту"
+      : st.kind === "error" ? st.text
+      : st.kind === "standby" ? `На связи · сейчас точку передаёт «${st.other}» — этот компьютер его не перебивает`
+      : `Передаётся${st.demo ? " демо" : ""} · ${st.at.toLocaleTimeString("ru-RU")} · ${st.demo ? "на плане" : "в кадре"} ${st.people} · точка «${pub.siteId}»`;
+  });
+}
+
+// Живой цифровой двойник в облаке — как в приложении для iPhone: раз в секунду в Realtime Database для личного кабинета
+const twinCloud = new TwinPublisher({
+  account, pilot: multi!.model, twin: twin.model,
+  deviceName: () => {
+    const ua = navigator.userAgent;
+    const os = /iPad|Macintosh.*Mobile/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) ? "iPad"
+      : /iPhone/.test(ua) ? "iPhone" : /Android/.test(ua) ? "Android" : /Windows/.test(ua) ? "Windows" : /Mac/.test(ua) ? "Mac" : /Linux/.test(ua) ? "Linux" : "";
+    return `Mantis · ${desktopShell === "windows" ? "Windows" : os ? `браузер на ${os}` : "браузер"}`;
+  },
+  demo: () => demo.snapshot(),
+  onPlanFromCloud: () => {
+    twin.planChanged();
+    multi?.refresh();
+    toast("План точки обновлён из личного кабинета");
+  },
+});
+mountTwinCloud(twinCloud);
+multi!.refresh();
+
+// ================================================================ запуск мониторинга → запись двойника и отчёт (как PilotModel.swift)
+const videoStorage = new VideoStorage(reports);
+const cameraAlerts = new CameraAlerts();
+const videoRun = new VideoRun(videoStorage, (note) => note && toast(note, true));
+multi?.onFrame((ch, shot, fr) => {
+  videoRun.frame(ch, shot, fr);
+  if (multi?.model.running) cameraAlerts.frame(ch, shot, fr?.boxes ?? null);
+});
+// уведомления о камерах (раз в 10 с), расписание мониторинга и сторож сна, значок в трее
+setInterval(() => {
+  if (multi?.model.running) cameraAlerts.check(multi.model.channels);
+}, 10_000);
+if (multi) startSchedule(multi.model);
+// значок в трее Windows: идёт ли мониторинг и сколько людей, запуск и остановка (строка меню и Dock на Mac)
+setInterval(() => {
+  const m = multi?.model;
+  if (!m) return;
+  const people = twinRef?.model.people.length ?? 0;
+  const live = m.channels.filter((c) => c.isLive).length;
+  const since = m.startedAt ? new Date(m.startedAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) : "";
+  trayStatus(m.running
+    ? { running: true, title: `Мониторинг идёт${since ? ` · с ${since}` : ""}`, people, canStart: false,
+        lines: [`Сейчас на плане: ${people} · за запуск: ${m.totals.people}`, `Камеры на связи: ${live} из ${m.channels.length}`] }
+    : { running: false, title: "Мониторинг остановлен", people: 0, canStart: m.channels.length > 0,
+        lines: schedulePrefs.enabled ? [`По расписанию: ${scheduleText()}`] : [] });
+}, 2000);
+onTrayCommand((cmd) => {
+  if (cmd === "start") void multi?.setRunning(true);
+  else if (cmd === "stop") {
+    stoppedManually();
+    void multi?.setRunning(false);
+  } else if (cmd === "report") setStatsSection("last");
+});
+
+/** Цифровой двойник пишется сам на каждый запуск (камеры, привязанные к плану). */
+function startRunTwin(): void {
+  const t = twinRef?.model;
+  const pilotM = multi?.model;
+  if (!t || !pilotM || t.recorder || t.demo) return;
+  const refs = pilotM.channels.flatMap((ch, i) =>
+    t.plan.calibrations[ch.id] ? [{ id: ch.id, name: channelShort(ch.config), colorIndex: channelColorIndex(ch.config, i) }] : []);
+  if (refs.length) t.startRecording(refs);
+}
+
+/** Последний сохранённый отчёт мониторинга — «Отчёт сохранён» на экране. */
+let lastRunSaved: RunReport | null = null;
+
+async function saveRunReport(run: RunEnd, closing: boolean): Promise<void> {
+  const duration = (run.ended - run.started) / 1000;
+  const video = await videoRun.finish();
+  // двойник этого запуска — в «Записи»
+  let twinID: string | undefined;
+  const t = twinRef?.model;
+  const rec = t && t.recorder && !t.recorder.demo ? t.stopRecording() : null;
+  if (rec && rec.data.frames.length > 1 && duration >= 5) {
+    const name = `Мониторинг ${new Date(run.started).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}`;
+    const m = closing ? null : await saveRecording(name, "live", rec.data, null, t!.backgroundBlob);
+    if (m) {
+      twinID = m.id;
+      records.reload();
+    }
+  }
+  if (duration < 5) return;
+  const tot = Object.values(run.hours).reduce(addHours, emptyHour());
+  const hasEntrance = run.cameras.some((c) => c.entrance);
+  const title = run.cameras.length > 1 ? `Мониторинг · ${run.cameras.length} камеры` : `Мониторинг · ${run.cameras[0]?.name ?? "камера"}`;
+  const r = newReport({
+    source: "camera", title, duration, people: tot.people, passed: tot.passed, slowed: tot.slowed, looked: tot.looked,
+    entered: hasEntrance ? tot.entered : undefined, started: run.started, hours: run.hours, twinID,
+    cameras: run.cameras.map((c) => {
+      const clips = video.clips.get(c.id) ?? [];
+      return {
+        name: c.name, people: c.stat.people, passed: c.stat.passed, slowed: c.stat.slowed, looked: c.stat.looked,
+        entered: c.entrance ? c.stat.entered : undefined, seconds: c.stat.seconds,
+        ...(clips.length ? { video: clips[0].file, videoSeconds: clips.reduce((a, x) => a + x.seconds, 0), clips } : {}),
+      };
+    }),
+  });
+  if (video.folder && video.clips.size) r.videoFolder = video.folder;
+  reports.add(r);
+  lastRunSaved = r;
+  if (!closing) toast("Отчёт запуска сохранён — «Статистика» → «Последний запуск»");
+}
+void lastRunSaved;
+
+// ================================================================ мониторинг, справка, «О приложении», боковое меню
+const monitoring = mountMonitoring({
+  root: $("#monitoring"), head: $("#mon-head"), planRoot: $("#plan-step"), multiRoot: $("#multi"), multi: multi!, twin,
+  quickShow: () => {
+    if (multi?.model.running) {
+      toast("Идёт мониторинг: камеры заняты. Быстрый показ — когда мониторинг остановлен.", true);
+      return;
+    }
+    switchTab("check");
+    void openCamera();
+  },
+});
+mountHelp($("#help"));
+// Точки: все точки аккаунта вживую — люди на плане, кто на связи, счётчики, план и камеры (как личный кабинет)
+const sites = mountCabinet($("#sites"), { embedded: true, openProfile: () => accountBtn.click() });
+account.subscribe((st) => sites.setUser(st.user));
+sites.hide();
+
+const demo = mountDemo($("#demo"), {
+  livePlan: () => ({ plan: twin.model.plan, background: twin.model.backgroundBlob }),
+  onSaved: () => records.reload(),
+  toast,
+});
+
+// Экран не гаснет (планшет у витрины), пока идёт мониторинг, демо, подсчёт или открыта камера
+setInterval(() => {
+  keepAwake(!!multi?.model.running || demo.isRunning() || running || source?.kind === "live");
+}, 2000);
+setNavigator((t) => switchTab(t as Tab));
+const about = mountAbout($("#about"), {
+  toast,
+  backend: () => detector?.backend ?? "не загружена",
+  platform: () => (isDesktop ? "Windows" : "браузер"),
+});
+const settings = mountSettings($("#settings"), {
+  video: videoStorage,
+  toast,
+  cameras: () => (multi?.model.channels ?? []).map((c) => ({ title: c.title, counting: c.isCounting, fps: c.fps })),
+  backend: () => detector?.backend ?? "не загружена",
+  running: () => !!multi?.model.running,
+});
+
+// ---- подсказка сверху экрана (как ScreenTipBar на Mac)
+const tipBar = mountTipBar($("#tip-bar"));
+function refreshTip(): void {
+  const key: Record<string, string | null> = {
+    monitoring: monitoring.current(), check: "video", sites: "online", demo: "demo", settings: "settings", help: null, about: null,
+    stats: statsSection === "last" ? "stats.last" : statsSection === "reports" ? "stats.reports" : statsSection === "hours" ? "stats.hours" : "records",
+  };
+  tipBar.set(key[currentTab] ?? null);
+}
+window.addEventListener("mantis:step", refreshTip);
+$("#sample-hide").addEventListener("click", () => sample.hide());
+sample.subscribe(() => {
+  if (currentTab === "stats") showStatsSection();
+});
+
+const SB_KEY = "sidebarCollapsed";
+function applySidebar(collapsed: boolean): void {
+  document.body.classList.toggle("sb-collapsed", collapsed);
+  $("#sb-collapse").title = collapsed ? "Развернуть меню" : "Свернуть меню";
+  $("#sb-collapse").querySelector(".sb-label")!.textContent = collapsed ? "Развернуть меню" : "Свернуть меню";
+}
+applySidebar((() => {
+  try {
+    return localStorage.getItem(SB_KEY) === "1";
+  } catch {
+    return false;
+  }
+})());
+$("#sb-collapse").addEventListener("click", () => {
+  const c = !document.body.classList.contains("sb-collapsed");
+  applySidebar(c);
+  try {
+    localStorage.setItem(SB_KEY, c ? "1" : "0");
+  } catch {
+    /* нет */
+  }
+});
+// точка «идёт мониторинг» у пункта меню
+setInterval(() => {
+  const dot = $("#sb-live");
+  const m = multi?.model;
+  dot.hidden = !m?.running;
+  if (m) dot.dataset.state = m.state === "recovering" ? "recovering" : "on";
+}, 1000);
+
+/** Был настроен пилот на одну камеру (прошлая версия) — переносим его камеру и разметку в первую камеру сетки. */
+function migrateSinglePilot(): void {
+  if (!multi || multi.model.channels.length) return;
+  const old = loadSaved("pilot");
+  if (!old.markup && !old.cameraId) return;
+  const ip = old.cameraId === IP_OPTION ? loadIpCamera() : null;
+  const m = old.markup?.zone?.length === 4 && old.markup.line?.length === 2 && old.markup.entrance?.length === 2 ? old.markup : defaultMarkup();
+  void multi.model.upsert(newChannelConfig({
+    name: ip ? ip.title : "Камера",
+    kind: ip ? "ip" : "webcam",
+    deviceId: ip ? "" : old.cameraId ?? "",
+    ip,
+    markup: m,
+    direction: old.direction ?? "camera",
+  }));
+  try {
+    if (localStorage.getItem(PILOT_FLAG) === "1") {
+      localStorage.removeItem(PILOT_FLAG);
+      localStorage.setItem("mantis.multi.active", "1");
+    }
+  } catch {
+    /* нет */
+  }
+}
 
 // ================================================================ пилот
 
@@ -1128,7 +1470,7 @@ async function startPilot(resume = false): Promise<void> {
         canvas.width = shot.width;
         canvas.height = shot.height;
       }
-      if (currentTab !== "pilot") return;
+      if ((currentTab as string) !== "pilot") return; // прежний пилот на одну камеру (запасной код)
       ctx.drawImage(shot, 0, 0);
       drawMarkup(ctx, markup);
       drawPeople(ctx, fr.boxes);
@@ -1186,6 +1528,7 @@ document.addEventListener("fullscreenchange", () => {
 window.addEventListener("beforeunload", (e) => {
   // приложение для Windows: окно с идущим пилотом прячется в трей, а при выходе досчитываем и сохраняем
   multi?.model.prepareForUnload();
+  if (multi?.model.running && !isDesktop) e.preventDefault(); // браузер: спросить перед закрытием вкладки
   if (pilot) {
     account.hours.save();
     e.preventDefault();
@@ -1199,6 +1542,13 @@ let devicesCache: Awaited<ReturnType<typeof loadDevices>> = [];
 let cameraCache: Awaited<ReturnType<typeof loadCameraHours>> = { hours: {}, names: {} };
 
 function cameraSeries(): CameraSeries[] {
+  const extra: CameraSeries[] = sample.on
+    ? SAMPLE_CAMERAS.map(([id, name]) => ({ id, name, hours: sample.cameraHours[id] ?? {}, live: null }))
+    : [];
+  return [...realCameraSeries(), ...extra];
+}
+
+function realCameraSeries(): CameraSeries[] {
   if (multi) {
     const store = multi.model.cameraHours;
     const live = new Map(multi.model.channels.map((c) => [c.id, c] as const));
@@ -1215,15 +1565,44 @@ function statsDays(): number {
   return Number(document.querySelector<HTMLInputElement>('#stats-period input:checked')?.value ?? 7);
 }
 
+/** Камера, по которой смотрим статистику (null — все камеры). */
+let statsCamera: string | null = null;
+
+/** Часы выбранной камеры или общие. */
+function statsHours(): Record<string, HourStat> {
+  if (statsCamera) return cameraSeries().find((c) => c.id === statsCamera)?.hours ?? {};
+  return sample.withSample(account.hours.hours);
+}
+
 function renderStatsView(): void {
   renderMetricChips($("#stats-metric"), statsMetric, (m) => {
     statsMetric = m;
     renderStatsView();
   });
   renderDevices($("#devices"), devicesCache);
-  renderCameraTable($("#stats-cameras"), cameraSeries(), statsDays());
+  const cams = cameraSeries().filter((c) => Object.keys(c.hours).length);
+  if (statsCamera && !cams.some((c) => c.id === statsCamera)) statsCamera = null;
+  const camBox = $("#stats-camera");
+  camBox.hidden = cams.length < 2;
+  camBox.replaceChildren(...[{ id: null as string | null, name: "Все камеры" }, ...cams].map((c) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = c.name;
+    b.setAttribute("role", "radio");
+    b.setAttribute("aria-checked", String(c.id === statsCamera));
+    b.addEventListener("click", () => {
+      statsCamera = c.id;
+      renderStatsView();
+    });
+    return b;
+  }));
+  const camHidden = !!statsCamera;
+  $("#stats-cameras").hidden = camHidden;
+  if (!camHidden) renderCameraTable($("#stats-cameras"), cameraSeries(), statsDays());
+  const scope = statsCamera ? cams.find((c) => c.id === statsCamera)?.name ?? "камера" : "все камеры";
+  renderCompare($("#stats-compare"), statsHours(), scope, renderStatsView);
   renderStats($("#stats-body"), $("#stats-sub"), {
-    hours: account.hours.hours,
+    hours: statsHours(),
     profile: account.state.profile,
     days: statsDays(),
     metric: statsMetric,
@@ -1254,13 +1633,155 @@ window.addEventListener("resize", () => {
   resizeTimer = window.setTimeout(() => currentTab === "stats" && renderStatsView(), 150);
 });
 $("#btn-stats-refresh").addEventListener("click", refreshStats);
+$("#btn-stats-excel").addEventListener("click", () => {
+  const rows = rowsFor(statsHours(), statsDays());
+  if (!rows.length) return toast("За этот период данных нет", true);
+  const days = statsDays();
+  const who = statsCamera ? cameraSeries().find((c) => c.id === statsCamera)?.name ?? "камера" : "все камеры";
+  download(hoursCsv(rows), `Статистика Mantis ${days ? `${days} дней` : "всё время"} ${who} ${dayStamp()}.csv`);
+});
+
+// ================================================================ отчёты и разделы статистики (как StatsHubView на Mac)
+type StatsSection = "last" | "reports" | "hours" | "records";
+const STATS_SECTIONS: [StatsSection, string][] = [["last", "Последний запуск"], ["reports", "Отчёты"], ["hours", "По часам и дням"], ["records", "Записи двойника"]];
+let statsSection: StatsSection = (() => {
+  try {
+    const v = localStorage.getItem("stats.section") as StatsSection | null;
+    return v && STATS_SECTIONS.some((x) => x[0] === v) ? v : "last";
+  } catch {
+    return "last";
+  }
+})();
+/** Открытый отчёт в разделе «Отчёты» (null — список). */
+let openedReport: { r: import("./reports/store").ReportSummary; o: DetailOptions } | null = null;
+
+reports.uid = () => account.uid;
+let reportsPulledFor: string | null = null;
+account.subscribe((st) => {
+  const uid = st.user?.uid ?? null;
+  if (uid && uid !== reportsPulledFor) {
+    reportsPulledFor = uid;
+    void reports.pull().catch((e) => console.warn("[mantis] отчёты из облака:", e));
+  }
+  if (!uid) reportsPulledFor = null;
+});
+
+const reportsCtx: ReportsCtx = {
+  store: reports,
+  profile: () => account.state.profile,
+  toast,
+  video: videoStorage.files(),
+  twin: {
+    async meta(id) {
+      const m = (await listRecordings()).find((x) => x.id === id);
+      return m ? { duration: m.duration, people: m.people, peak: m.peak } : null;
+    },
+    open(id) {
+      setStatsSection("records");
+      records.select(id);
+    },
+    async remove(id) {
+      await deleteRecording(id);
+      records.reload();
+    },
+  },
+};
+const reportsRoot = $("#reports-view");
+const reportsListBox = document.createElement("div");
+const reportsDetailBox = document.createElement("div");
+reportsRoot.append(reportsListBox, reportsDetailBox);
+const reportsList = mountReportsList(reportsListBox, reportsCtx, (r, o) => {
+  openedReport = { r, o: o ?? {} };
+  showStatsSection();
+});
+
+function renderHub(): void {
+  const bar = $("#stats-hub");
+  const seg = document.createElement("div");
+  seg.className = "seg hub-seg";
+  seg.style.gridTemplateColumns = `repeat(${STATS_SECTIONS.length}, auto)`;
+  for (const [v, t] of STATS_SECTIONS) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "stats-section";
+    input.checked = v === statsSection;
+    input.addEventListener("change", () => input.checked && setStatsSection(v));
+    const span = document.createElement("span");
+    span.textContent = t;
+    label.append(input, span);
+    seg.append(label);
+  }
+  bar.replaceChildren(seg);
+}
+
+function setStatsSection(v: StatsSection): void {
+  statsSection = v;
+  openedReport = null;
+  try {
+    localStorage.setItem("stats.section", v);
+  } catch {
+    /* нет */
+  }
+  if (currentTab !== "stats") switchTab("stats");
+  else showStatsSection();
+}
+
+function showStatsSection(): void {
+  refreshTip();
+  $("#sample-banner").hidden = !sample.on || currentTab !== "stats";
+  renderHub();
+  $("#stats-hub").hidden = false;
+  statsEl.hidden = statsSection !== "hours";
+  reportsRoot.hidden = statsSection !== "last" && statsSection !== "reports";
+  if (statsSection === "records") records.show();
+  else records.hide();
+  if (statsSection === "hours") {
+    renderStatsView();
+    void refreshStats();
+  } else if (statsSection === "last") {
+    reportsListBox.hidden = true;
+    reportsDetailBox.hidden = false;
+    const r = lastRunReport(reports);
+    if (r) renderReportDetail(reportsDetailBox, r, reportsCtx, { onDeleted: showStatsSection });
+    else {
+      const e = document.createElement("div");
+      e.className = "empty";
+      e.innerHTML = "<h3>Запусков пока не было</h3><p>Запустите и остановите мониторинг — здесь появится статистика последнего запуска.</p>";
+      reportsDetailBox.replaceChildren(e);
+    }
+  } else if (statsSection === "reports") {
+    if (openedReport) {
+      reportsListBox.hidden = true;
+      reportsDetailBox.hidden = false;
+      const back = () => {
+        openedReport = null;
+        showStatsSection();
+      };
+      renderReportDetail(reportsDetailBox, openedReport.r, reportsCtx, { ...openedReport.o, back, onDeleted: back });
+    } else {
+      reportsDetailBox.hidden = true;
+      reportsListBox.hidden = false;
+      reportsList.render();
+    }
+  }
+}
+reports.subscribe(() => {
+  if (currentTab === "stats" && statsSection === "last") showStatsSection();
+});
 
 // ================================================================ вкладки
 
 function switchTab(tab: Tab): void {
+  // «Записи» — теперь раздел «Статистики», как на Mac
+  if (tab === "records") {
+    statsSection = "records";
+    tab = "stats";
+    if (currentTab === "stats") return showStatsSection();
+  }
   if (tab === currentTab) return;
   if (tab === "check" && (pilot || multi?.model.running)) {
-    toast("Идёт пилот: камера занята. Остановите пилот, чтобы проверять видео.", true);
+    toast("Идёт мониторинг: камеры заняты. Остановите мониторинг, чтобы проверять видео.", true);
     return;
   }
   if (running && tab !== currentTab) {
@@ -1270,30 +1791,44 @@ function switchTab(tab: Tab): void {
   document.querySelectorAll<HTMLButtonElement>(".tab").forEach((b) =>
     b.dataset.tab === tab ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current"),
   );
-  multi?.hide();
-  if (tab === "pilot" && multi) {
-    // настольная версия: свой экран пилота на нескольких камерах
+  monitoring.hide();
+  records.hide();
+  $("#stats-hub").hidden = true;
+  $("#sample-banner").hidden = true;
+  reportsRoot.hidden = true;
+  demo.hide();
+  sites.hide();
+  $("#sites").hidden = tab !== "sites";
+  $("#help").hidden = tab !== "help";
+  $("#about").hidden = tab !== "about";
+  if (tab === "about") about.refresh();
+  if (tab === "settings") settings.show();
+  else settings.hide();
+  queueMicrotask(refreshTip);
+  if (tab !== "check" && tab !== "stats") {
     if (!pilot) closeSource();
     layoutEl.hidden = true;
     statsEl.hidden = true;
-    multi.show();
+    if (tab === "monitoring") monitoring.show();
+    if (tab === "demo") demo.show();
+    if (tab === "sites") sites.show();
     return;
   }
   layoutEl.hidden = tab === "stats";
   statsEl.hidden = tab !== "stats";
   if (tab === "stats") {
-    renderStatsView();
-    void refreshStats();
+    showStatsSection();
     return;
   }
-  const newMode: Mode = tab;
+  const newMode: Mode = "check";
   if (newMode !== mode) {
     if (!pilot) closeSource();
     mode = newMode;
     applySaved(mode);
   }
   reportEl.hidden = true;
-  if (tab === "pilot") {
+  if (false as boolean) {
+    // прежний пилот на одну камеру (запасной код, экран не показывается)
     if (pilot) {
       canvas.hidden = false;
       drop.hidden = true;
@@ -1319,7 +1854,7 @@ interface AgentInfo {
   autostart: boolean;
 }
 (async function agentControls() {
-  if (isDesktop) return; // в приложении для Windows автозапуск и выход — на экране пилота
+  if (isDesktop || multi) return; // автозапуск и выключение — на экране пилота (сетка камер)
   let info: AgentInfo | null = null;
   try {
     const r = await fetch(new URL("api/agent", new URL(import.meta.env.BASE_URL, location.href)), { cache: "no-store" });
@@ -1364,8 +1899,10 @@ interface AgentInfo {
 // Пилот шёл до перезагрузки страницы — продолжаем сам
 (async function resumePilot() {
   if (multi) {
-    switchTab("pilot"); // приложение у витрины открывается сразу на пилоте
+    // пункт «Анализ» скрыт из меню — приложение открывается на мониторинге
+    switchTab("monitoring");
     if (!MultiPilot.wasActive) return;
+    switchTab("monitoring");
     await account.whenReady();
     await multi.resume();
     return;
@@ -1377,7 +1914,7 @@ interface AgentInfo {
     /* нет */
   }
   if (!flag) return;
-  switchTab("pilot");
+  switchTab("monitoring");
   await account.whenReady();
   void startPilot(true);
 })();

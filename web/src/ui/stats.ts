@@ -17,7 +17,7 @@ const num = (v: number, d = 0) => v.toLocaleString("ru-RU", { maximumFractionDig
 const pctOf = (a: number, b: number) => (b > 0 ? `${Math.round((a / b) * 100)}%` : "");
 
 /** Столбчатая диаграмма в SVG: общая шкала, подписи по оси, выделенный максимум. */
-function barChart(bars: Bar[], color: string, opts: { width: number; height?: number; labelEvery?: number; highlightMax?: boolean }): SVGSVGElement {
+export function barChart(bars: Bar[], color: string, opts: { width: number; height?: number; labelEvery?: number; highlightMax?: boolean }): SVGSVGElement {
   const NS = "http://www.w3.org/2000/svg";
   // Ширина — реальная ширина карточки в CSS-пикселях: подписи не растягиваются и не сжимаются
   const W = Math.max(240, Math.round(opts.width)), H = opts.height ?? 200, left = 34, right = 8, top = 12, bottom = 22;
@@ -84,7 +84,7 @@ function barChart(bars: Bar[], color: string, opts: { width: number; height?: nu
   return svg;
 }
 
-function card(title: string, sub: string, body: Node, wide = false): HTMLElement {
+export function card(title: string, sub: string, body: Node, wide = false): HTMLElement {
   const c = el("div", wide ? "card wide" : "card");
   c.append(el("h3", undefined, title), el("p", "sub", sub), body);
   return c;
@@ -146,7 +146,7 @@ export function renderStats(root: HTMLElement, sub: HTMLElement, s: StatsInput):
     const e = el("div", "empty");
     e.append(
       el("h3", undefined, "Данных пока нет"),
-      el("p", undefined, "Запустите пилот на вкладке «Пилот» — статистика копится по часам автоматически. Если вы считали в приложении на iPhone, войдите в тот же аккаунт."),
+      el("p", undefined, "Запустите мониторинг в разделе «Мониторинг» — статистика копится по часам автоматически. Если вы считали в приложении на iPhone, войдите в тот же аккаунт."),
     );
     root.replaceChildren(e);
     return;
@@ -205,7 +205,7 @@ export function renderStats(root: HTMLElement, sub: HTMLElement, s: StatsInput):
     el("span", "hint-small", `${num(mo.basis)} ${mo.basisTitle} × ${num(mo.conversion, 1)}% покупают × средний чек ${rubles(s.profile.avgCheck)} = ${rubles(mo.revenue)} за период`),
   );
   if (mo.upliftPerMonth !== null) moneyBody.append(el("span", "hint-small", `Если витрина зацепит ещё 10% прохожих: +${rubles(mo.upliftPerMonth)} в месяц`));
-  moneyBody.append(el("span", "hint-small faint", "Средний чек и конверсии — в профиле точки (кнопка аккаунта справа вверху)."));
+  moneyBody.append(el("span", "hint-small faint", "Средний чек и конверсии — в профиле точки («Профиль» в меню слева)."));
   grid.append(
     card("Оценка витрины", "без остановок и «подошли ближе» — они не копятся по часам", scoreBody),
     card("В деньгах", "оценка по профилю точки", moneyBody),

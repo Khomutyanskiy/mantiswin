@@ -5,11 +5,16 @@
 //   POST   /api/streams                — {url, user, password} → открыть поток
 //   GET    /api/streams/:id            — состояние потока
 //   GET    /api/streams/:id/frame      — последний кадр JPEG (заголовки X-Frame-Seq, X-Frame-Size)
-//   DELETE /api/streams/:id            — закрыть поток
+//   POST   /api/cameras/auto           — {cam, known} → адрес потока и вход подобраны сами
+//   POST   /api/ptz/probe | move | stop — поворот камеры по ONVIF
+//   /api/video/*                       — видео мониторинга на диске (bridge/video.mjs)
+//   DELETE /api/streams/:id            — закрыть поток (ffmpeg останавливается, когда закрыли все, кто открыл)
 // Мост слушает только этот компьютер: пароли камер и видео не уходят в интернет.
 
 import { OnvifError, localSubnets, onvifStreamUri, scanCameras, templates } from "./onvif.mjs";
 import { StreamManager } from "./streams.mjs";
+import { VideoStore, handleVideo } from "./video.mjs";
+import { isAndroid, ptzMove, ptzProbe, ptzStop, resolveCamera } from "./autoconnect.mjs";
 
 function send(res, code, data, headers = {}) {
   const body = typeof data === "string" || Buffer.isBuffer(data) ? data : JSON.stringify(data);
@@ -61,8 +66,9 @@ function envTargets() {
 }
 
 /** extraTargets — дополнительные адреса для ONVIF-поиска [[host, port]] (для тестов). */
-export function createBridge({ extraTargets = envTargets(), allowRemote = false } = {}) {
+export function createBridge({ extraTargets = envTargets(), allowRemote = false, videoRoot = undefined } = {}) {
   const streams = new StreamManager();
+  const video = new VideoStore(videoRoot);
 
   async function handle(req, res, next) {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -70,14 +76,34 @@ export function createBridge({ extraTargets = envTargets(), allowRemote = false 
     if (!allowRemote && !isLocal(req)) return send(res, 403, { error: "Мост доступен только с этого компьютера" });
     const parts = url.pathname.split("/").filter(Boolean); // api, ...
     try {
+      if (await handleVideo(video, req, res, url, send)) return;
       if (req.method === "GET" && url.pathname === "/api/bridge") {
         const ff = streams.ffmpeg();
-        return send(res, 200, { ok: true, ffmpeg: ff ? ff.version : null, subnets: localSubnets().map((s) => s.description) });
+        return send(res, 200, { ok: true, ffmpeg: ff ? ff.version : null, subnets: localSubnets().map((s) => s.description), video: true });
       }
       if (req.method === "GET" && url.pathname === "/api/cameras/scan") {
-        const r = await scanCameras({ extraTargets });
+        const r = await scanCameras({ extraTargets, androidProbe: isAndroid });
         r.cameras = r.cameras.map((c) => ({ ...c, templates: c.onvifURL ? [] : templates(c) }));
         return send(res, 200, r);
+      }
+      // автоподключение найденной камеры: адрес потока и вход подбираются сами (IPAutoConnect на Mac)
+      if (req.method === "POST" && url.pathname === "/api/cameras/auto") {
+        const b = await readJson(req);
+        if (!b.cam?.ip) return send(res, 400, { error: "Нет камеры" });
+        const known = Array.isArray(b.known) ? b.known.filter((k) => Array.isArray(k) && k.length === 2).map((k) => [String(k[0]), String(k[1])]) : [];
+        return send(res, 200, await resolveCamera(b.cam, known, Number.isFinite(b.maxWrong) ? b.maxWrong : 3));
+      }
+      // поворот камеры по ONVIF
+      if (req.method === "POST" && url.pathname === "/api/ptz/probe") {
+        const b = await readJson(req);
+        return send(res, 200, { ptz: await ptzProbe({ host: String(b.host ?? ""), onvifURL: b.onvifURL || undefined, user: String(b.user ?? ""), password: String(b.password ?? "") }) });
+      }
+      if (req.method === "POST" && (url.pathname === "/api/ptz/move" || url.pathname === "/api/ptz/stop")) {
+        const b = await readJson(req);
+        if (!b.ptz?.ptzURL) return send(res, 400, { error: "Камера не поворачивается" });
+        if (url.pathname.endsWith("stop")) await ptzStop(b.ptz);
+        else await ptzMove(b.ptz, b.pan, b.tilt, b.zoom);
+        return send(res, 200, { ok: true });
       }
       if (req.method === "POST" && url.pathname === "/api/cameras/onvif") {
         const b = await readJson(req);
@@ -111,7 +137,7 @@ export function createBridge({ extraTargets = envTargets(), allowRemote = false 
           });
         }
         if (req.method === "DELETE" && parts.length === 3) {
-          streams.close(s.id);
+          streams.release(s.id);
           return send(res, 200, { ok: true });
         }
       }
@@ -122,5 +148,5 @@ export function createBridge({ extraTargets = envTargets(), allowRemote = false 
     }
   }
 
-  return { handle, streams, close: () => streams.closeAll() };
+  return { handle, streams, video, close: () => streams.closeAll() };
 }

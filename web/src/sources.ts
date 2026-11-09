@@ -59,6 +59,8 @@ export interface FoundCamera {
   onvifURL?: string;
   rtspPorts: number[];
   templates: { title: string; url: string }[];
+  /** Телефон Android с IP Webcam (RTSP на порту 8080). */
+  android?: boolean;
 }
 
 export interface IpCameraConfig {
@@ -120,7 +122,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * Подключить IP-камеру: мост запускает ffmpeg, ждём первый кадр (до timeoutMs).
  * onStatus — что сейчас происходит (для подписи «Подключаюсь…»).
  */
-export async function openIpCamera(cfg: IpCameraConfig, onStatus?: (s: string) => void, timeoutMs = 25_000): Promise<LiveSource> {
+export async function openIpCamera(
+  cfg: IpCameraConfig, onStatus?: (s: string) => void, timeoutMs = 25_000, cancelled: () => boolean = () => false,
+): Promise<LiveSource> {
   onStatus?.("Подключаюсь к камере…");
   let st = await api<StreamStatus>("streams", json({ url: cfg.url, user: cfg.user, password: cfg.password }));
   const id = st.id;
@@ -128,6 +132,11 @@ export async function openIpCamera(cfg: IpCameraConfig, onStatus?: (s: string) =
   let first: Blob | null = null;
   let seq = 0;
   while (!first) {
+    if (cancelled()) {
+      // подключение больше не нужно (окно закрыли, пилот остановили) — не ждём 25 с
+      await api(`streams/${id}`, { method: "DELETE" }).catch(() => undefined);
+      throw new Error("подключение отменено");
+    }
     const r = await fetch(new URL(`api/streams/${id}/frame`, new URL(import.meta.env.BASE_URL, location.href)));
     if (r.status === 200) {
       first = await r.blob();
@@ -184,6 +193,7 @@ export async function openIpCamera(cfg: IpCameraConfig, onStatus?: (s: string) =
     },
     lost: () => closed || Date.now() - lastOk > 30_000,
     close() {
+      if (closed) return; // мост считает зрителей — закрываем один раз
       closed = true;
       void api(`streams/${id}`, { method: "DELETE" }).catch(() => undefined);
     },
@@ -210,4 +220,53 @@ export function saveIpCamera(c: IpCameraConfig | null): void {
   } catch {
     /* нет */
   }
+}
+
+// ---------------------------------------------------------------- автоподключение и поворот (как на Mac)
+
+export interface AutoFound {
+  url: string;
+  user: string;
+  password: string;
+  codec: string;
+  /** Как нашли: ONVIF, путь марки, Android. */
+  how: string;
+}
+
+export type AutoOutcome = { state: "ok"; found: AutoFound } | { state: "needsPassword" } | { state: "failed"; message: string };
+
+/** Подобрать адрес потока и вход найденной камеры (известные пароли — первыми, затем заводские). */
+export function autoConnect(cam: FoundCamera, known: [string, string][], maxWrong = 3): Promise<AutoOutcome> {
+  return api("cameras/auto", json({ cam, known, maxWrong }), 90_000);
+}
+
+export interface PtzInfo {
+  ptzURL: string;
+  profile: string;
+  user: string;
+  password: string;
+  zoom: boolean;
+}
+
+/** Умеет ли камера поворачиваться (ONVIF PTZ). null — нет. */
+export async function ptzProbe(cfg: IpCameraConfig): Promise<PtzInfo | null> {
+  let host = "";
+  try {
+    host = new URL(cfg.url).hostname;
+  } catch {
+    return null;
+  }
+  try {
+    return (await api<{ ptz: PtzInfo | null }>("ptz/probe", json({ host, user: cfg.user, password: cfg.password }), 25_000)).ptz;
+  } catch {
+    return null;
+  }
+}
+
+export function ptzMove(ptz: PtzInfo, pan: number, tilt: number, zoom = 0): Promise<unknown> {
+  return api("ptz/move", json({ ptz, pan, tilt, zoom }), 6000).catch(() => undefined);
+}
+
+export function ptzStop(ptz: PtzInfo): Promise<unknown> {
+  return api("ptz/stop", json({ ptz }), 6000).catch(() => undefined);
 }

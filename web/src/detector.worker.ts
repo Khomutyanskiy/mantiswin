@@ -118,12 +118,17 @@ async function detect(req: Extract<WorkerRequest, { type: "detect" }>): Promise<
   post({ type: "result", id: req.id, detections, maxScore, ms: performance.now() - started });
 }
 
-self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
+// Задачи — строго по одной: несколько камер шлют кадры одновременно, а сессия нейросети (особенно WebGPU)
+// не умеет считать два кадра параллельно — без очереди она зависает и все камеры получают «нейросеть не отвечает».
+let queue: Promise<void> = Promise.resolve();
+self.onmessage = (e: MessageEvent<WorkerRequest>) => {
   const m = e.data;
-  try {
-    if (m.type === "init") await init(m.modelUrl, m.preferGpu, m.threads);
-    else if (m.type === "detect") await detect(m);
-  } catch (err) {
-    post({ type: "error", id: m.type === "detect" ? m.id : undefined, message: err instanceof Error ? err.message : String(err) });
-  }
+  queue = queue.then(async () => {
+    try {
+      if (m.type === "init") await init(m.modelUrl, m.preferGpu, m.threads);
+      else if (m.type === "detect") await detect(m);
+    } catch (err) {
+      post({ type: "error", id: m.type === "detect" ? m.id : undefined, message: err instanceof Error ? err.message : String(err) });
+    }
+  });
 };

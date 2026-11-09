@@ -79,6 +79,17 @@ function init(): { auth: Auth; db: Firestore } {
   return { auth: auth!, db: db! };
 }
 
+/** Приложение Firebase (для Realtime Database цифрового двойника). */
+export function firebaseApp(): FirebaseApp {
+  init();
+  return app!;
+}
+
+/** Firestore проекта. */
+export function firestore(): Firestore {
+  return init().db;
+}
+
 export function watchAuth(cb: (user: User | null) => void): () => void {
   return onAuthStateChanged(init().auth, cb);
 }

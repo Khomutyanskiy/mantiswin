@@ -2,19 +2,25 @@
 // Сетка (Авто / Крупно / Средне / Мелко / Мини), камера на всё окно, у каждой камеры — своя разметка
 // и чувствительность, итоги за сегодня по каждой камере и суммарно.
 
+import { ask } from "../ui/confirm";
 import type { Account } from "../cloud/account";
 import type { Detector } from "../detector";
-import { desktopInfo, quitApp, setAutostart } from "../desktop";
+import { agentAutostart, agentInfo, agentQuit, desktopInfo, isDesktop, quitApp, setAutostart } from "../desktop";
 import type { ShowcaseDirection } from "../engine/headpose";
 import type { FrameResult } from "../engine/session";
 import { listCameras } from "../pilot/runner";
 import { type HourStat } from "../pilot/hours";
-import { FULL_FRAME, HORIZONTAL_LINE, type Markup, VERTICAL_LINE, drawMarkup, drawPeople, handlePoints } from "../ui/draw";
+import { drawMarkup, drawPeople } from "../ui/draw";
 import { chooseIpCamera } from "../ui/ipcam";
+import { autoScanPanel } from "./autoscan";
+import { stoppedManually } from "../pilot/schedule";
+import { type PtzInfo, ptzMove, ptzProbe, ptzStop } from "../sources";
 import type { IpCameraConfig } from "../sources";
-import { type Channel, type ChannelConfig, newChannelConfig } from "./channel";
-import { BEHAVIOR_TITLES, LEVEL_HINTS, LEVEL_TITLES, defaultFilter, filterSummary } from "./filter";
-import { MultiPilot } from "./model";
+import { type Channel, type ChannelConfig, channelColorIndex, channelLabel, newChannelConfig } from "./channel";
+import { cameraColor } from "../twin/plan";
+import { filterSummary } from "./filter";
+import { sensitivityDialog } from "./sensitivity";
+import { MultiPilot, type RunEnd } from "./model";
 
 export interface MultiDeps {
   account: Account;
@@ -22,6 +28,13 @@ export interface MultiDeps {
   resetDetector: () => void;
   toast: (text: string, error?: boolean) => void;
   openAccount: () => void;
+  /** «Настроить» в блоке «Расположение камер»: где витрина и привязка к плану. */
+  onSetup?: (ch: Channel) => void;
+  /** Привязка камеры к плану одной строкой («на плане по полу», «не привязана к плану»). */
+  bindingText?: (ch: Channel) => { text: string; ok: boolean };
+  /** Запуск и конец мониторинга (запись двойника, отчёт запуска). */
+  onRunStart?: () => void;
+  onRunEnd?: (run: RunEnd, closing: boolean) => void | Promise<void>;
 }
 
 export interface MultiView {
@@ -30,6 +43,18 @@ export interface MultiView {
   hide(): void;
   /** Пилот шёл до перезапуска приложения — продолжить. */
   resume(): Promise<void>;
+  /** Подписка на кадры всех камер (цифровой двойник). */
+  onFrame(cb: (ch: Channel, shot: ImageBitmap, fr: FrameResult | null) => void): () => void;
+  /** Запустить или остановить пилот (как кнопка на экране пилота). */
+  setRunning(on: boolean): Promise<void>;
+  /** Открыть окно добавления камеры. */
+  addCamera(): void;
+  /** Камера на всё окно. */
+  focus(id: string): void;
+  /** Блок «Аккаунт / Приложение» (показывается на шаге «Мониторинг»). */
+  readonly foot: HTMLElement;
+  /** Перерисовать (поменялась привязка камер). */
+  refresh(): void;
 }
 
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string): HTMLElementTagNameMap[K] => {
@@ -60,6 +85,8 @@ interface TileRefs {
   kind: HTMLElement;
   meta: HTMLElement;
   stats: HTMLElement;
+  bindText: HTMLElement;
+  dot: HTMLElement;
   filter: HTMLElement;
 }
 
@@ -87,6 +114,7 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
   let hostname = "";
   const tiles = new Map<string, TileRefs>();
   let tileOrder = "";
+  let dragId: string | null = null;
   let focusId: string | null = null;
   let gridSize: GridSize = (() => {
     try {
@@ -104,20 +132,29 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
     hostname: () => hostname,
     onFrame: (ch, shot, fr) => drawFrame(ch, shot, fr),
     onChange: () => scheduleUpdate(),
+    onRunStart: () => deps.onRunStart?.(),
+    onRunEnd: (run, closing) => deps.onRunEnd?.(run, closing),
   });
 
   // ---------------------------------------------------------------- каркас
   const head = el("div", "multi-head");
   const stateBox = el("div", "pilot-state");
   stateBox.dataset.state = "stopped";
-  const stateText = el("span", undefined, "Пилот не запущен");
+  const stateText = el("span", undefined, "Мониторинг не запущен");
   stateBox.append(el("span", "dot"), stateText);
   const metaText = el("p", "mono small faint");
   const headLeft = el("div", "multi-title");
   headLeft.append(stateBox, metaText);
 
   const btnAdd = button("Добавить камеру", "btn small", () => openCameraDialog(null));
-  const btnStart = button("Запустить пилот", "btn primary", () => void toggleRun());
+  const btnStart = button("Запустить мониторинг", "btn primary", async () => {
+    if (model.running && !(await ask({
+      title: "Остановить мониторинг?",
+      text: "Подсчёт на всех камерах остановится, статистика сохранится.",
+      ok: "Остановить", danger: true,
+    }))) return;
+    void toggleRun();
+  });
   const btnFull = button("Во весь экран", "btn small", () => toggleKiosk());
   const gridSeg = segmented("multi-grid", GRID_TITLES, gridSize, (v) => {
     gridSize = v;
@@ -148,14 +185,16 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
   const grid = el("div", "cam-grid");
   const empty = el("div", "multi-empty");
   empty.append(
-    el("h1", undefined, "Пилот на нескольких камерах"),
+    el("h1", undefined, "Мониторинг на нескольких камерах"),
     el("p", "lead", "Компьютер у витрины считает людей круглосуточно сразу с нескольких камер: встроенной, USB и IP-камер в сети магазина. У каждой камеры — своя разметка и своя статистика, итоги по часам уходят в облако и видны на iPhone, Mac и в браузере."),
     (() => {
       const ol = el("ol", "intro-steps");
       for (const t of [
-        "Войдите в аккаунт Mantis (кнопка справа вверху) — иначе статистика останется только на этом компьютере.",
+        "Войдите в аккаунт Mantis («Профиль» в меню слева) — иначе статистика останется только на этом компьютере.",
         "Добавьте камеры и разметьте кадр каждой: зона витрины, линия прохода, вход.",
-        "Нажмите «Запустить пилот». Окно можно свернуть или закрыть в трей — подсчёт продолжится.",
+        isDesktop
+          ? "Нажмите «Запустить мониторинг». Окно можно свернуть или закрыть в трей — подсчёт продолжится."
+          : "Нажмите «Запустить мониторинг». Держите вкладку открытой на экране, компьютер — на зарядке.",
       ]) ol.append(el("li", undefined, t));
       return ol;
     })(),
@@ -173,24 +212,83 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
   const autoRow = el("label", "toggle-row");
   autoRow.htmlFor = "multi-autostart";
   const autoText = el("div", "toggle-text");
-  autoText.append(el("b", undefined, "Запускать при входе в Windows"), el("small", undefined, "После перезагрузки компьютера пилот продолжится сам"));
+  const autoTitle = el("b", undefined, "Запускать при входе в Windows");
+  autoText.append(autoTitle, el("small", undefined, "После перезагрузки компьютера мониторинг продолжится сам"));
   autoRow.append(autoText, autostartInput);
   const versionLine = el("p", "mono small faint");
+  let viaAgent = false;
   const quitBtn = button("Выйти из Mantis", "link", async () => {
     if (model.running) {
-      deps.toast("Сначала остановите пилот", true);
+      deps.toast("Сначала остановите мониторинг", true);
       return;
     }
-    await quitApp();
+    if (!viaAgent) return quitApp();
+    await agentQuit();
+    document.body.replaceChildren(Object.assign(document.createElement("p"), {
+      className: "empty",
+      textContent: "Агент выключен. Чтобы продолжить, запустите Mantis Agent снова.",
+    }));
   });
   appBox.append(el("p", "eyebrow", "Приложение"), autoRow, quitBtn, versionLine);
   const footLeft = el("div", "multi-foot-col");
   footLeft.append(el("p", "eyebrow", "Аккаунт"), accountBox, syncLine);
   foot.append(footLeft, appBox);
 
-  root.append(head, today, grid, empty, foot);
+  // шаг «Камеры»: заголовок со стрелкой сворачивает сетку; запуск, итоги и аккаунт — на шаге «Мониторинг»
+  const GRID_COLLAPSE = "collapse.cams.grid", BIND_COLLAPSE = "collapse.cams.binding";
+  const isCollapsed = (k: string) => {
+    try {
+      return localStorage.getItem(k) === "1";
+    } catch {
+      return false;
+    }
+  };
+  const setCollapsed = (k: string, v: boolean) => {
+    try {
+      if (v) localStorage.setItem(k, "1");
+      else localStorage.removeItem(k);
+    } catch {
+      /* нет */
+    }
+  };
+  const collapseHead = (title: string, key: string, onToggle: () => void) => {
+    const b = el("button", "collapse-head");
+    b.type = "button";
+    const arrow = el("span", "collapse-arrow", "▾");
+    const t = el("span", "collapse-title", title);
+    const n = el("span", "collapse-count");
+    b.append(arrow, t, n);
+    b.addEventListener("click", () => {
+      setCollapsed(key, !isCollapsed(key));
+      onToggle();
+    });
+    return { b, n, sync: () => b.classList.toggle("collapsed", isCollapsed(key)) };
+  };
+  const gridHead = collapseHead("Камеры", GRID_COLLAPSE, () => update());
+  headLeft.replaceChildren(gridHead.b);
+  today.hidden = true;
+  btnStart.hidden = true;
+  btnFull.hidden = true;
+
+  const bindBox = el("section", "bind-card");
+  const bindHead = collapseHead("Расположение камер", BIND_COLLAPSE, () => update());
+  const bindTop = el("div", "bind-top");
+  const bindList = el("div", "bind-list");
+  bindTop.append(bindHead.b);
+  bindBox.append(bindTop, bindList);
+  root.append(head, grid, empty, bindBox);
 
   autostartInput.addEventListener("change", async () => {
+    if (viaAgent) {
+      try {
+        autostartInput.checked = await agentAutostart(autostartInput.checked);
+        deps.toast(autostartInput.checked ? "Агент будет запускаться при входе в систему" : "Автозапуск выключен");
+      } catch (e) {
+        autostartInput.checked = !autostartInput.checked;
+        deps.toast(`Автозапуск: ${(e as Error).message}`, true);
+      }
+      return;
+    }
     const r = await setAutostart(autostartInput.checked);
     if (r === null) {
       autostartInput.checked = !autostartInput.checked;
@@ -200,11 +298,22 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
     autostartInput.checked = r;
     deps.toast(r ? "Mantis будет запускаться при входе в Windows" : "Автозапуск выключен");
   });
-  void desktopInfo().then((info) => {
+  appBox.hidden = true;
+  void desktopInfo().then(async (info) => {
     if (!info) {
-      appBox.hidden = true;
+      // в браузере: если страницу отдаёт Mantis Агент — его автозапуск и выключение
+      const a = await agentInfo();
+      if (!a) return;
+      viaAgent = true;
+      appBox.hidden = false;
+      autoTitle.textContent = "Запускать при входе в систему";
+      autostartInput.checked = a.autostart;
+      quitBtn.textContent = "Выключить агента";
+      versionLine.textContent = `Mantis Агент ${a.version}`;
+      hostname = a.platform === "darwin" ? "Mac" : a.platform === "win32" ? "Windows" : "";
       return;
     }
+    appBox.hidden = false;
     hostname = info.hostname;
     autostartInput.checked = info.autostart;
     versionLine.textContent = `Mantis для Windows ${info.version}`;
@@ -238,12 +347,15 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
   }
 
   // ---------------------------------------------------------------- рисование кадров
+  const frameListeners = new Set<(ch: Channel, shot: ImageBitmap, fr: FrameResult | null) => void>();
   function drawFrame(ch: Channel, shot: ImageBitmap, fr: FrameResult | null): void {
-    if (editor.channelId === ch.id) editorFrame(shot);
-    if (!visible) return;
+    for (const cb of frameListeners) cb(ch, shot, fr);
+    if (sens.channelId === ch.id) sens.frame(ch, shot, fr);
+    // камера на всё окно открывается и с шага «Мониторинг» (сетка камер при этом скрыта)
+    if (!visible && focusId !== ch.id) return;
     const targets: HTMLCanvasElement[] = [];
     const t = tiles.get(ch.id);
-    if (t && !focusId) targets.push(t.canvas);
+    if (t && !focusId && visible) targets.push(t.canvas);
     if (focusId === ch.id) targets.push(focusCanvas);
     for (const c of targets) {
       if (c.width !== shot.width || c.height !== shot.height) {
@@ -252,14 +364,89 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
       }
       const ctx = c.getContext("2d")!;
       ctx.drawImage(shot, 0, 0);
-      drawMarkup(ctx, ch.config.markup);
+      // на кадре — только зона витрины (линия и вход не рисуются: их больше не настраивают)
+      drawMarkup(ctx, { ...ch.config.markup, lineEnabled: false, entranceEnabled: false });
       if (fr) drawPeople(ctx, fr.boxes);
     }
     if (t) t.msg.hidden = true;
   }
 
   // ---------------------------------------------------------------- плитки
+  // ---------------------------------------------------------------- поворот IP-камеры (PTZPad.swift)
+  const ptzInfo = new Map<string, { url: string; info: PtzInfo | null | "pending" }>();
+  let ptzUnlocked = false;
+
+  /** Стрелки поворота поверх видео: держите — камера поворачивается, отпустили — стоп. */
+  function ptzPad(ch: Channel): HTMLElement {
+    const box = el("div", "ptz-pad");
+    box.hidden = true;
+    box.addEventListener("click", (e) => e.stopPropagation());
+    const ip = ch.config.ip!;
+    const known = ptzInfo.get(ch.id);
+    const render = (info: PtzInfo) => {
+      box.hidden = false;
+      box.replaceChildren();
+      if (model.running && !ptzUnlocked) {
+        box.append(button("🔒 Поворот", "ptz-key wide", async () => {
+          const ok = await ask({
+            title: "Повернуть камеру во время мониторинга?", ok: "Повернуть",
+            text: "После поворота привязка к плану и разметка (зона, линия, вход) перестанут совпадать с кадром — люди на плане окажутся не там. Верните камеру обратно или привяжите её заново.",
+          });
+          if (ok) {
+            ptzUnlocked = true;
+            render(info);
+          }
+        }));
+        return;
+      }
+      const key = (label: string, pan: number, tilt: number, zoom: number, title: string) => {
+        const b = button(label, "ptz-key");
+        b.title = `${title} — держите`;
+        let on = false;
+        const stop = () => {
+          if (!on) return;
+          on = false;
+          b.classList.remove("on");
+          void ptzStop(info);
+        };
+        b.addEventListener("pointerdown", (e) => {
+          e.preventDefault();
+          b.setPointerCapture(e.pointerId);
+          on = true;
+          b.classList.add("on");
+          void ptzMove(info, pan, tilt, zoom);
+        });
+        b.addEventListener("pointerup", stop);
+        b.addEventListener("pointercancel", stop);
+        b.addEventListener("lostpointercapture", stop);
+        return b;
+      };
+      const v = 0.5;
+      const cross = el("div", "ptz-cross");
+      cross.append(el("i"), key("▲", 0, v, 0, "Вверх"), el("i"), key("◀", -v, 0, 0, "Влево"), el("i"), key("▶", v, 0, 0, "Вправо"), el("i"), key("▼", 0, -v, 0, "Вниз"), el("i"));
+      box.append(cross);
+      if (info.zoom) {
+        const z = el("div", "ptz-zoom");
+        z.append(key("+", 0, 0, v, "Приблизить"), key("−", 0, 0, -v, "Отдалить"));
+        box.append(z);
+      }
+    };
+    if (known && known.url === ip.url && known.info !== "pending") {
+      if (known.info) render(known.info);
+    } else if (!known || known.url !== ip.url) {
+      ptzInfo.set(ch.id, { url: ip.url, info: "pending" });
+      void ptzProbe(ip).then((info) => {
+        ptzInfo.set(ch.id, { url: ip.url, info });
+        if (info && box.isConnected) render(info);
+      });
+    }
+    return box;
+  }
+
+  /** Плитки пересобираются, когда меняются камеры, их источники или запуск (замок поворота). */
+  const tileKey = () => `${model.running ? 1 : 0}|${model.channels.map((c) => `${c.id}:${c.config.kind}:${c.config.ip?.url ?? ""}`).join("|")}`;
   function rebuildTiles(): void {
+    if (!model.running) ptzUnlocked = false;
     grid.replaceChildren();
     tiles.clear();
     for (const ch of model.channels) {
@@ -270,17 +457,22 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
       canvas.height = 360;
       const msg = el("div", "cam-msg", "Нет картинки");
       view.append(canvas, msg);
+      if (ch.config.kind === "ip" && ch.config.ip) view.append(ptzPad(ch));
       view.title = "Открыть на всё окно";
       view.addEventListener("click", () => setFocus(ch.id));
       const headEl = el("header", "cam-head");
       const name = el("b");
       const kind = el("span", "cam-kind");
       const meta = el("span", "mono cam-meta");
-      headEl.append(el("span", "dot"), name, kind, meta);
-      const stats = el("div", "cam-stats mono");
+      const dot = el("span", "dot");
+      headEl.append(dot, name, kind, meta);
+      // где витрина и привязка к плану + «Настроить» (раньше — отдельный блок «Расположение камер»)
+      const stats = el("div", "cam-bind");
+      const bindText = el("span", "bind-sum");
+      stats.append(bindText);
       const filter = el("div", "cam-filter");
       const actions = el("div", "cam-actions");
-      const del = button("Удалить", "link danger");
+      const del = button("Удалить", "btn small danger-outline");
       let armed = 0;
       del.addEventListener("click", async () => {
         if (!armed) {
@@ -296,16 +488,48 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
         deps.toast(`Камера «${ch.title}» удалена. Её статистика осталась.`);
       });
       actions.append(
-        button("Разметка", "chip", () => openEditor(ch.id)),
-        button("Чувствительность", "chip", () => openFilterDialog(ch.id)),
-        button("Изменить", "chip", () => openCameraDialog(ch.id)),
+        button("Настроить", "btn small", () => {
+          const c = model.channels.find((x) => x.id === ch.id);
+          if (c) deps.onSetup?.(c);
+        }),
+        button("Чувствительность", "btn small", () => openFilterDialog(ch.id)),
+        el("span", "grow"),
         del,
       );
       root.append(view, headEl, stats, filter, actions);
       grid.append(root);
-      tiles.set(ch.id, { root, canvas, msg, name, kind, meta, stats, filter });
+      // перетаскивание карточек: бросили на другую — меняются местами
+      root.draggable = true;
+      root.addEventListener("dragstart", (e) => {
+        dragId = ch.id;
+        root.classList.add("dragging");
+        e.dataTransfer?.setData("text/plain", ch.id);
+        if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+      });
+      root.addEventListener("dragend", () => {
+        dragId = null;
+        root.classList.remove("dragging");
+        grid.querySelectorAll(".drop-target").forEach((x) => x.classList.remove("drop-target"));
+      });
+      root.addEventListener("dragover", (e) => {
+        if (!dragId || dragId === ch.id) return;
+        e.preventDefault();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+        root.classList.add("drop-target");
+      });
+      root.addEventListener("dragleave", (e) => {
+        if (!root.contains(e.relatedTarget as Node | null)) root.classList.remove("drop-target");
+      });
+      root.addEventListener("drop", (e) => {
+        e.preventDefault();
+        root.classList.remove("drop-target");
+        const from = dragId;
+        dragId = null;
+        if (from && from !== ch.id) model.swap(from, ch.id);
+      });
+      tiles.set(ch.id, { root, canvas, msg, name, kind, meta, stats, bindText, dot, filter });
     }
-    tileOrder = model.channels.map((c) => c.id).join("|");
+    tileOrder = tileKey();
     applyGrid();
   }
 
@@ -335,16 +559,39 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
     }, 250);
   }
 
+  const DIRS: Record<ShowcaseDirection, string> = { camera: "Камера в витрине", left: "Витрина слева", right: "Витрина справа" };
+  function renderBinding(): void {
+    bindHead.sync();
+    bindList.hidden = isCollapsed(BIND_COLLAPSE);
+    bindBox.hidden = true; // перенесено в карточку камеры
+    bindList.replaceChildren(...model.channels.map((ch, i) => {
+      const r = el("div", "bind-row");
+      const dot = el("i", "tw-dot");
+      dot.style.background = ["#47d7f0", "#ff6fae", "#7cf2c8", "#ff9f40", "#b18cff", "#ffd23f", "#3fc9b4", "#7a86ff"][i % 8];
+      const b = deps.bindingText?.(ch) ?? { text: "", ok: true };
+      const sum = el("span", "bind-sum");
+      sum.append(document.createTextNode(`${DIRS[ch.config.direction] ?? DIRS.camera} · `));
+      const bt = el("span", b.ok ? "" : "tw-st-warn", b.text);
+      sum.append(bt);
+      r.append(dot, el("b", undefined, channelLabel(ch.config)), el("span", "cam-kind", ch.config.kind === "ip" ? "IP" : "USB"), sum, el("span", "grow"),
+        button("Настроить", "btn small", () => deps.onSetup?.(ch)));
+      return r;
+    }));
+  }
+
   function update(): void {
-    if (model.channels.map((c) => c.id).join("|") !== tileOrder) rebuildTiles();
+    if (tileKey() !== tileOrder) rebuildTiles();
     const has = model.channels.length > 0;
     empty.hidden = has;
-    grid.hidden = !has;
-    today.hidden = !has;
-    gridSeg.hidden = model.channels.length < 2;
-    btnStart.hidden = !has;
+    gridHead.sync();
+    gridHead.n.textContent = String(model.channels.length);
+    renderBinding();
+    grid.hidden = !has || isCollapsed(GRID_COLLAPSE);
+    today.hidden = true;
+    gridSeg.hidden = model.channels.length < 2 || isCollapsed(GRID_COLLAPSE);
+    btnStart.hidden = true;
     btnAdd.hidden = !has; // пока камер нет — большая кнопка в приглашении
-    btnFull.hidden = !has;
+    btnFull.hidden = true;
 
     stateBox.dataset.state = model.running ? (model.state === "counting" ? "counting" : "recovering") : "stopped";
     stateText.textContent = model.message;
@@ -354,7 +601,7 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
       const t = since.toLocaleString("ru-RU", same ? { hour: "2-digit", minute: "2-digit" } : { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
       metaText.textContent = `с ${t} · ${model.fps.toFixed(1)} кадр/с на камеру`;
     } else metaText.textContent = has ? `${model.channels.length} ${plural(model.channels.length, "камера", "камеры", "камер")}` : "";
-    btnStart.textContent = model.running ? "Остановить пилот" : "Запустить пилот";
+    btnStart.textContent = model.running ? "Остановить мониторинг" : "Запустить мониторинг";
     btnStart.className = model.running ? "btn" : "btn primary";
 
     const d = model.today();
@@ -369,29 +616,31 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
     todayCells.entered.note.textContent = pct(d.entered, d.people);
     todayCells.entered.box.hidden = !anyEntrance;
 
-    for (const ch of model.channels) {
+    model.channels.forEach((ch, idx) => {
       const t = tiles.get(ch.id);
-      if (!t) continue;
+      if (!t) return;
+      t.dot.style.background = cameraColor(channelColorIndex(ch.config, idx));
       t.root.dataset.state = ch.state;
-      t.name.textContent = ch.title;
+      t.name.textContent = channelLabel(ch.config);
       t.kind.textContent = ch.config.kind === "ip" ? "IP" : "USB";
       t.meta.textContent = ch.state === "counting" ? `${ch.fps.toFixed(1)} кадр/с · ${Math.round(ch.msPerFrame)} мс` : stateTitle(ch);
-      t.stats.textContent = statLine(model.todayFor(ch.id), ch.config.markup.entranceEnabled);
+      const b = deps.bindingText?.(ch) ?? { text: "", ok: true };
+      t.bindText.replaceChildren(document.createTextNode(`${DIRS[ch.config.direction] ?? DIRS.camera} · `), el("span", b.ok ? "" : "tw-st-warn", b.text));
       t.filter.textContent = `Чувствительность: ${filterSummary(ch.config.filter)}`;
       if (ch.message && ch.state !== "counting") {
         t.msg.hidden = false;
         t.msg.textContent = ch.message;
       } else if (ch.state === "idle") {
         t.msg.hidden = false;
-        t.msg.textContent = "Пилот не запущен";
+        t.msg.textContent = "Мониторинг не запущен";
       }
-    }
+    });
 
     if (focusId) {
       const ch = model.channels.find((c) => c.id === focusId);
       if (!ch) setFocus(null);
       else {
-        focusTitle.textContent = ch.title;
+        focusTitle.textContent = channelLabel(ch.config);
         focusMeta.textContent = ch.state === "counting" ? `${ch.fps.toFixed(1)} кадр/с` : stateTitle(ch);
         focusStats.textContent = statLine(model.todayFor(ch.id), ch.config.markup.entranceEnabled);
       }
@@ -443,9 +692,10 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
     btnStart.disabled = true;
     try {
       if (model.running) {
+        stoppedManually(); // по расписанию сам не запустится до конца рабочих часов
         await model.stop();
         exitKiosk();
-        deps.toast("Пилот остановлен. Статистика — на вкладке «Статистика».");
+        deps.toast("Мониторинг остановлен. Статистика — в разделе «Статистика».");
       } else {
         if (!model.channels.length) return openCameraDialog(null);
         await model.start();
@@ -497,6 +747,7 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
       sync();
     });
     kindSeg.style.marginTop = "14px";
+    const direction: ShowcaseDirection = cfg.direction; // задаётся в «Настроить»
 
     const webBox = el("div", "ip-section");
     const camSelect = el("select", "select");
@@ -505,15 +756,30 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
 
     const ipBox = el("div", "ip-section");
     const ipLine = el("p", "hint-small");
-    const ipBtn = button("Найти или подключить IP-камеру", "btn small", async () => {
+    const manualIp = async () => {
       const r = await chooseIpCamera();
       if (!r) return;
       r.source.close(); // подключится сама камера пилота
       ip = r.cfg;
       if (!nameInput.value.trim()) nameInput.placeholder = r.cfg.title;
       sync();
+    };
+    const ipBtn = button("Найти или подключить IP-камеру", "btn small", () => void manualIp());
+    // новая IP-камера — сразу ищем в сети и подключаем сами (как на Mac); вручную — по ссылке внизу
+    const auto = existing ? null : autoScanPanel({
+      known: () => model.channels.flatMap((c) => (c.config.kind === "ip" && c.config.ip?.user ? [[c.config.ip.user, c.config.ip.password] as [string, string]] : [])),
+      added: () => new Set(model.channels.flatMap((c) => {
+        try {
+          return c.config.kind === "ip" && c.config.ip ? [new URL(c.config.ip.url).hostname] : [];
+        } catch {
+          return [];
+        }
+      })),
+      manual: () => void manualIp(),
+      onChange: () => sync(),
     });
     ipBox.append(ipLine, ipBtn);
+    if (auto) ipBox.append(auto.root);
 
     const err = el("p", "form-error");
     err.hidden = true;
@@ -527,7 +793,16 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
       webBox.hidden = kind !== "webcam";
       ipBox.hidden = kind !== "ip";
       ipLine.textContent = ip ? `Подключена: ${ip.title}` : "IP-камера не выбрана. Mantis найдёт камеры в сети (ONVIF) или подключится по адресу rtsp://.";
-      ipBtn.textContent = ip ? "Выбрать другую" : "Найти или подключить IP-камеру";
+      ipBtn.textContent = ip ? "Выбрать" : "Найти или подключить IP-камеру";
+      if (auto) {
+        // новая: список найденных — главный путь; строка «вручную» — когда ввели адрес сами
+        ipLine.hidden = !ip;
+        ipBtn.hidden = true;
+        if (kind === "ip") auto.start();
+        const n = auto.selected().length;
+        save.textContent = kind === "ip" && !ip ? (n > 1 ? `Добавить камеры (${n})` : "Добавить и настроить") : "Добавить и настроить";
+        save.disabled = kind === "ip" && !ip && n === 0;
+      }
     }
     sync();
     camDialog.showModal();
@@ -563,11 +838,31 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
     }
     const firstFree = cams.find((c) => !owners.has(c.deviceId));
     camSelect.value = cfg.deviceId && cams.some((c) => c.deviceId === cfg.deviceId) ? cfg.deviceId : firstFree?.deviceId ?? "";
-    camHint.textContent = cams.length > 1 ? "Одну камеру можно добавить в пилот один раз." : "Подключите USB-камеру — она появится в списке.";
+    camHint.textContent = cams.length > 1 ? "Одну камеру можно добавить только один раз." : "Подключите USB-камеру — она появится в списке.";
 
     save.onclick = async (e) => {
       e.preventDefault();
       err.hidden = true;
+      // отмеченные найденные камеры — все сразу
+      const picked = auto && kind === "ip" && !ip ? auto.selected() : [];
+      if (picked.length) {
+        save.disabled = true;
+        const first = model.channels.length;
+        for (const [i, p] of picked.entries()) {
+          await model.upsert(newChannelConfig({
+            ...(picked.length === 1 && nameInput.value.trim() ? { name: nameInput.value.trim() } : { name: `Камера ${first + i + 1}` }),
+            kind: "ip", ip: p.cfg, direction,
+          }));
+        }
+        auto!.markAdded();
+        camDialog.close();
+        deps.toast(picked.length > 1 ? `Добавлено камер: ${picked.length}` : "Камера добавлена");
+        if (picked.length === 1) {
+          const added = model.channels[model.channels.length - 1];
+          if (added) deps.onSetup?.(added);
+        }
+        return;
+      }
       if (kind === "ip" && !ip) {
         err.textContent = "Выберите IP-камеру";
         err.hidden = false;
@@ -584,232 +879,30 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
         kind,
         deviceId: kind === "webcam" ? camSelect.value : "",
         ip: kind === "ip" ? ip : null,
+        direction,
       };
       if (!next.name) next.name = kind === "ip" ? ip?.title ?? "IP-камера" : camSelect.selectedOptions[0]?.textContent?.replace(/ — уже в.*$/, "") || "Камера";
       save.disabled = true;
       await model.upsert(next);
       camDialog.close();
-      if (!existing) openEditor(next.id);
+      if (!existing) {
+        // новая камера — сразу в настройку: зона витрины, где витрина, место на плане, цвет
+        const added = model.channels.find((c) => c.id === next.id);
+        if (added) deps.onSetup?.(added);
+      }
     };
   }
 
-  // ================================================================ окно «Разметка»
-  const editDialog = el("dialog", "dialog markup-dialog");
-  document.body.append(editDialog);
-  const editor = {
-    channelId: null as string | null,
-    markup: null as Markup | null,
-    canvas: el("canvas"),
-    frame: el("canvas"),
-    dragging: null as string | null,
-    hasFrame: false,
-    msg: el("div", "cam-msg"),
-  };
-  editDialog.addEventListener("close", () => {
-    editor.channelId = null;
-    editor.markup = null;
-    editor.hasFrame = false;
-  });
-
-  function editorFrame(shot: ImageBitmap): void {
-    if (editor.dragging) return; // не дёргаем картинку под пальцем
-    const f = editor.frame;
-    if (f.width !== shot.width || f.height !== shot.height) {
-      f.width = shot.width;
-      f.height = shot.height;
-    }
-    f.getContext("2d")!.drawImage(shot, 0, 0);
-    editor.hasFrame = true;
-    editor.msg.hidden = true;
-    redrawEditor();
-  }
-
-  function redrawEditor(): void {
-    const c = editor.canvas, m = editor.markup;
-    if (!m) return;
-    const w = editor.hasFrame ? editor.frame.width : 1280, hgt = editor.hasFrame ? editor.frame.height : 720;
-    if (c.width !== w || c.height !== hgt) {
-      c.width = w;
-      c.height = hgt;
-    }
-    const ctx = c.getContext("2d")!;
-    if (editor.hasFrame) ctx.drawImage(editor.frame, 0, 0);
-    else {
-      ctx.fillStyle = "#0e1839";
-      ctx.fillRect(0, 0, c.width, c.height);
-    }
-    drawMarkup(ctx, m, { handles: true, active: editor.dragging });
-  }
-
-  const toNorm = (e: PointerEvent) => {
-    const r = editor.canvas.getBoundingClientRect();
-    return { x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) };
-  };
-  editor.canvas.addEventListener("pointerdown", (e) => {
-    if (!editor.markup) return;
-    const p = toNorm(e);
-    const r = editor.canvas.getBoundingClientRect();
-    let best: string | null = null, bestD = 28;
-    for (const [id, hp] of handlePoints(editor.markup)) {
-      const d = Math.hypot((hp.x - p.x) * r.width, (hp.y - p.y) * r.height);
-      if (d < bestD) {
-        bestD = d;
-        best = id;
-      }
-    }
-    if (!best) return;
-    editor.dragging = best;
-    editor.canvas.setPointerCapture(e.pointerId);
-    redrawEditor();
-  });
-  editor.canvas.addEventListener("pointermove", (e) => {
-    if (!editor.dragging || !editor.markup) return;
-    const m = /^(zone|line|entrance)(\d)$/.exec(editor.dragging)!;
-    editor.markup[m[1] as "zone" | "line" | "entrance"][Number(m[2])] = toNorm(e);
-    redrawEditor();
-  });
-  const endDrag = () => {
-    editor.dragging = null;
-    redrawEditor();
-  };
-  editor.canvas.addEventListener("pointerup", endDrag);
-  editor.canvas.addEventListener("pointercancel", endDrag);
-
-  function openEditor(id: string): void {
-    const ch = model.channels.find((c) => c.id === id);
-    if (!ch) return;
-    const m: Markup = structuredClone(ch.config.markup);
-    let dir: ShowcaseDirection = ch.config.direction;
-    editor.channelId = id;
-    editor.markup = m;
-    editor.hasFrame = false;
-    editor.msg.hidden = false;
-    editor.msg.textContent = ch.state === "idle" ? "Подключаю камеру…" : "Жду кадр…";
-    if (!model.running) model.setPreview(true); // нужна живая картинка
-
-    const form = el("form", "dialog-inner");
-    form.method = "dialog";
-    form.noValidate = true;
-    form.addEventListener("submit", (e) => e.preventDefault()); // Enter в поле не закрывает окно
-    const h = el("div", "dialog-head");
-    h.append(el("h2", undefined, `Разметка · ${ch.title}`), button("✕", "icon-btn", () => editDialog.close()));
-    const body = el("div", "markup-body");
-    const view = el("div", "markup-view");
-    view.append(editor.canvas, editor.msg);
-    const side = el("div", "markup-side");
-
-    const dirSeg = segmented("mk-dir", [["camera", "Камера в витрине"], ["left", "Слева в кадре"], ["right", "Справа в кадре"]], dir, (v) => (dir = v));
-    const fs = el("fieldset", "field");
-    fs.append(el("legend", undefined, "Где витрина"), dirSeg);
-
-    const toggles = el("div", "toggles");
-    const zoneRow = el("div", "toggle-row");
-    const zt = el("div", "toggle-text");
-    zt.append(el("b", undefined, "Зона витрины"), el("small", undefined, "Тормозил и смотрел считаются только внутри"));
-    zoneRow.append(el("span", "key cyan"), zt, button("Весь кадр", "link", () => {
-      m.zone = FULL_FRAME.map((p) => ({ ...p }));
-      redrawEditor();
-    }));
-    const lineSw = el("input", "switch");
-    lineSw.type = "checkbox";
-    lineSw.checked = m.lineEnabled;
-    const lineRow = el("label", "toggle-row");
-    const lt = el("div", "toggle-text");
-    lt.append(el("b", undefined, "Линия подсчёта"), el("small", undefined, "Пересёк — значит прошёл мимо"));
-    lineRow.append(el("span", "key red"), lt, lineSw);
-    const lineActs = el("div", "sub-actions");
-    lineActs.append(
-      button("Вертикальная", "chip", () => ((m.line = VERTICAL_LINE.map((p) => ({ ...p }))), redrawEditor())),
-      button("Горизонтальная", "chip", () => ((m.line = HORIZONTAL_LINE.map((p) => ({ ...p }))), redrawEditor())),
-    );
-    lineSw.addEventListener("change", () => {
-      m.lineEnabled = lineSw.checked;
-      lineActs.hidden = !m.lineEnabled;
-      redrawEditor();
-    });
-    lineActs.hidden = !m.lineEnabled;
-    const enSw = el("input", "switch");
-    enSw.type = "checkbox";
-    enSw.checked = m.entranceEnabled;
-    const enRow = el("label", "toggle-row");
-    const et = el("div", "toggle-text");
-    et.append(el("b", undefined, "Вход в магазин"), el("small", undefined, "Линия по порогу двери"));
-    enRow.append(el("span", "key green dashed"), et, enSw);
-    enSw.addEventListener("change", () => {
-      m.entranceEnabled = enSw.checked;
-      redrawEditor();
-    });
-    toggles.append(zoneRow, lineRow, lineActs, enRow);
-
-    const actions = el("div", "actions");
-    const save = button(model.running ? "Сохранить — применится сразу" : "Сохранить", "btn primary wide", async (e) => {
-      e.preventDefault();
-      await model.upsert({ ...ch.config, markup: m, direction: dir });
-      editDialog.close();
-      deps.toast(`Разметка «${ch.title}» сохранена`);
-    });
-    actions.append(save, button("Отмена", "btn ghost wide", () => editDialog.close()));
-    side.append(el("p", "hint-small", "Перетаскивайте точки прямо на кадре."), fs, toggles, actions);
-    body.append(view, side);
-    form.append(h, body);
-    editDialog.replaceChildren(form);
-    editDialog.showModal();
-    redrawEditor();
-  }
-
   // ================================================================ окно «Чувствительность»
-  const filterDialog = el("dialog", "dialog");
-  document.body.append(filterDialog);
-
+  const sens = sensitivityDialog({
+    save: async (ch, f) => model.upsert({ ...ch.config, filter: f }),
+    toast: deps.toast,
+    running: () => model.running,
+    previewAfter: () => visible && !model.running,
+  });
   function openFilterDialog(id: string): void {
     const ch = model.channels.find((c) => c.id === id);
-    if (!ch) return;
-    const f = { ...defaultFilter(), ...ch.config.filter };
-    const form = el("form", "dialog-inner");
-    form.method = "dialog";
-    form.noValidate = true;
-    form.addEventListener("submit", (e) => e.preventDefault()); // Enter в поле не закрывает окно
-    const h = el("div", "dialog-head");
-    h.append(el("h2", undefined, `Чувствительность · ${ch.title}`), button("✕", "icon-btn", () => filterDialog.close()));
-    const hint = el("p", "hint-small", LEVEL_HINTS[f.level]);
-    const levelSeg = segmented("flt-level", LEVEL_TITLES.map((t, i) => [String(i), t] as [string, string]), String(f.level), (v) => {
-      f.level = Number(v);
-      hint.textContent = LEVEL_HINTS[f.level];
-    }, "seg five");
-    const lvl = el("fieldset", "field");
-    lvl.append(el("legend", undefined, "Что считать человеком"), levelSeg);
-    const hLabel = el("label", "field-label", "Минимальный рост фигуры, % высоты кадра (0 — не ограничивать)");
-    const hInput = el("input", "input");
-    hInput.type = "number";
-    hInput.min = "0";
-    hInput.max = "80";
-    hInput.step = "1";
-    hInput.value = String(f.minHeightPercent || 0);
-    const bSeg = segmented("flt-beh", BEHAVIOR_TITLES.map((t, i) => [String(i), t] as [string, string]), String(f.behavior), (v) => (f.behavior = Number(v)));
-    const beh = el("fieldset", "field");
-    beh.style.marginTop = "14px";
-    beh.append(el("legend", undefined, "Строгость «посмотрел / притормозил»"), bSeg);
-    const note = el("p", "hint-small faint", "Уровень и рост применяются сразу; строгость — с новым куском подсчёта (счётчики сохраняются).");
-    note.style.marginTop = "12px";
-    const actions = el("div", "actions");
-    actions.append(
-      button("Сохранить", "btn primary wide", async (e) => {
-        e.preventDefault();
-        const v = parseFloat(hInput.value.replace(",", "."));
-        f.minHeightPercent = isFinite(v) ? Math.min(80, Math.max(0, v)) : 0;
-        await model.upsert({ ...ch.config, filter: f });
-        filterDialog.close();
-        deps.toast(`Чувствительность «${ch.title}»: ${filterSummary(f)}`);
-      }),
-      button("Стандартная", "btn ghost wide", async (e) => {
-        e.preventDefault();
-        await model.upsert({ ...ch.config, filter: defaultFilter() });
-        filterDialog.close();
-      }),
-    );
-    form.append(h, lvl, hint, hLabel, hInput, beh, note, actions);
-    filterDialog.replaceChildren(form);
-    filterDialog.showModal();
+    if (ch) sens.open(ch);
   }
 
   // ---------------------------------------------------------------- показать / спрятать
@@ -827,14 +920,31 @@ export function mountMulti(root: HTMLElement, deps: MultiDeps): MultiView {
     hide() {
       visible = false;
       root.hidden = true;
-      if (!model.running && !editor.channelId) model.setPreview(false);
+      if (!model.running && !sens.channelId) model.setPreview(false);
       setFocus(null);
     },
     async resume() {
       if (model.running || !model.channels.length) return;
       await model.start();
-      deps.toast("Пилот возобновлён после перезапуска");
+      deps.toast("Мониторинг возобновлён после перезапуска");
       update();
+    },
+    onFrame(cb) {
+      frameListeners.add(cb);
+      return () => frameListeners.delete(cb);
+    },
+    async setRunning(on) {
+      if (on !== model.running) await toggleRun();
+    },
+    focus(id) {
+      setFocus(id);
+    },
+    foot,
+    refresh() {
+      update();
+    },
+    addCamera() {
+      void openCameraDialog(null);
     },
   };
 }

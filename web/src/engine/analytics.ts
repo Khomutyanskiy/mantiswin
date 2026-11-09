@@ -76,6 +76,8 @@ export class TrackState {
   private _inZone = false;
   everInZone = false;
   lookingNow = false;
+  /** Сотрудник (долго в кадре) — не считается. */
+  staff = false;
   box: Box;
 
   constructor(readonly trackId: number, t: number, box: Box) {
@@ -254,6 +256,17 @@ export class Analytics {
       this.tracks.delete(id);
       this.finish(tr);
     }
+  }
+
+  /** Сотрудник: снять с него «притормозил» и «посмотрел» и не засчитывать дальше (как markStaff в Analytics.swift). */
+  markStaff(id: number): void {
+    const tr = this.tracks.get(id);
+    if (!tr) return;
+    if (tr.slowed) this.counters.slowed = Math.max(0, this.counters.slowed - 1);
+    else tr.slowed = true;
+    if (tr.looked) this.counters.looked = Math.max(0, this.counters.looked - 1);
+    else tr.looked = true;
+    tr.staff = true;
   }
 
   private finish(tr: TrackState): void {

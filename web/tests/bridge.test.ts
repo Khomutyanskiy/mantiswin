@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 // @ts-expect-error — модули моста на чистом JS
 import { httpAuthorization, parseProbeMatch, templates, xmlAttrs, xmlFirst } from "../bridge/onvif.mjs";
 // @ts-expect-error — модули моста на чистом JS
-import { jpegSize, redact, withCredentials } from "../bridge/streams.mjs";
+import { StreamManager, jpegSize, redact, withCredentials } from "../bridge/streams.mjs";
 
 describe("ONVIF", () => {
   it("разбирает ProbeMatch: адрес сервиса, название, модель", () => {
@@ -53,5 +53,19 @@ describe("потоки", () => {
     const sof = [0xff, 0xc0, 0x00, 0x11, 0x08, 0x01, 0xe0, 0x02, 0x80, 0x03, ...new Array(9).fill(0)];
     const b = new Uint8Array([0xff, 0xd8, ...app0, ...sof, 0xff, 0xd9]);
     expect(jpegSize(b)).toEqual([640, 480]);
+  });
+});
+
+describe("мост: один поток на несколько зрителей", () => {
+  it("ffmpeg останавливается, только когда поток закрыли все, кто его открыл", () => {
+    const m = new StreamManager();
+    const a = m.open("rtsp://127.0.0.1:9/none", "", "");
+    const b = m.open("rtsp://127.0.0.1:9/none", "", "");
+    expect(b.id).toBe(a.id);
+    m.release(a.id);
+    expect(m.get(a.id)).toBeTruthy(); // пилот ещё смотрит
+    m.release(a.id);
+    expect(m.get(a.id)).toBeUndefined();
+    m.closeAll();
   });
 });

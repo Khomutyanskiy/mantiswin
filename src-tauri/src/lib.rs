@@ -9,7 +9,9 @@
 //   • камера разрешается странице без вопросов (WebView2 PermissionRequested);
 //   • компьютер и экран не засыпают, пока идёт пилот;
 //   • автозапуск при входе в Windows; один экземпляр; значок в трее;
-//   • окно с идущим пилотом при закрытии прячется в трей, подсчёт продолжается.
+//   • окно с идущим пилотом при закрытии прячется в трей, подсчёт продолжается;
+//   • уведомления Windows (камера пропала, расписание, толпа) и значок в трее с состоянием мониторинга
+//     и пунктами «Запустить / Остановить мониторинг», «Отчёт последнего запуска» (как строка меню на Mac).
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -18,11 +20,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde::Serialize;
-use tauri::menu::{Menu, MenuItem};
+use serde::{Deserialize, Serialize};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, RunEvent, State, Url, WebviewWindow, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_notification::NotificationExt;
 
 /// Порт страницы. Постоянный: от адреса зависят настройки камер и вход в аккаунт (хранятся по адресу страницы).
 const BASE_PORT: u16 = 8797;
@@ -31,7 +34,23 @@ struct AppState {
     agent: Mutex<Option<Child>>,
     pilot_running: AtomicBool,
     keep_awake: Arc<AtomicBool>,
+    /// Не гасить и экран (настройка «Не гасить экран во время мониторинга»).
+    keep_display: Arc<AtomicBool>,
     quitting: AtomicBool,
+}
+
+/// Состояние для значка в трее — присылает страница раз в пару секунд (только при изменении).
+#[derive(Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct TrayStatus {
+    running: bool,
+    title: String,
+    #[serde(default)]
+    lines: Vec<String>,
+    #[serde(default)]
+    people: i64,
+    #[serde(default)]
+    can_start: bool,
 }
 
 #[derive(Serialize)]
@@ -53,8 +72,19 @@ fn app_info(app: AppHandle) -> AppInfo {
 }
 
 #[tauri::command]
-fn keep_awake(state: State<'_, AppState>, on: bool) {
+fn keep_awake(state: State<'_, AppState>, on: bool, display: Option<bool>) {
+    state.keep_display.store(display.unwrap_or(true), Ordering::SeqCst);
     state.keep_awake.store(on, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn notify(app: AppHandle, title: String, body: String) -> Result<(), String> {
+    app.notification().builder().title(title).body(body).show().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn tray_status(app: AppHandle, status: TrayStatus) -> Result<(), String> {
+    update_tray(&app, &status).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -212,14 +242,16 @@ fn request_quit(app: &AppHandle) {
     });
 }
 
-/// Пока идёт пилот, Windows не уводит компьютер в сон и не гасит экран (сброс таймера бездействия раз в 30 с).
-fn keep_awake_loop(flag: Arc<AtomicBool>) {
+/// Пока идёт мониторинг, Windows не уводит компьютер в сон (сброс таймера бездействия раз в 30 с);
+/// экран не гаснет, только если так выбрано в настройках.
+fn keep_awake_loop(flag: Arc<AtomicBool>, display: Arc<AtomicBool>) {
     std::thread::spawn(move || loop {
         if flag.load(Ordering::SeqCst) {
+            let _with_display = display.load(Ordering::SeqCst);
             #[cfg(windows)]
             unsafe {
                 use windows_sys::Win32::System::Power::{SetThreadExecutionState, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED};
-                SetThreadExecutionState(ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+                SetThreadExecutionState(if _with_display { ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED } else { ES_SYSTEM_REQUIRED });
             }
         }
         std::thread::sleep(Duration::from_secs(30));
@@ -254,10 +286,58 @@ fn allow_camera(window: &WebviewWindow) {
 #[cfg(not(windows))]
 fn allow_camera(_window: &WebviewWindow) {}
 
+/// Меню значка: состояние мониторинга, строки (люди на плане, камеры, расписание), запуск / остановка, отчёт.
+fn tray_menu(app: &AppHandle, s: &TrayStatus) -> tauri::Result<Menu<tauri::Wry>> {
+    let menu = Menu::new(app)?;
+    if !s.title.is_empty() {
+        menu.append(&MenuItem::with_id(app, "title", &s.title, false, None::<&str>)?)?;
+        for (i, line) in s.lines.iter().enumerate() {
+            menu.append(&MenuItem::with_id(app, format!("line{i}"), line, false, None::<&str>)?)?;
+        }
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+        if s.running {
+            menu.append(&MenuItem::with_id(app, "stop", "Остановить мониторинг", true, None::<&str>)?)?;
+        } else {
+            menu.append(&MenuItem::with_id(app, "start", "Запустить мониторинг", s.can_start, None::<&str>)?)?;
+        }
+        menu.append(&MenuItem::with_id(app, "report", "Отчёт последнего запуска", true, None::<&str>)?)?;
+        menu.append(&PredefinedMenuItem::separator(app)?)?;
+    }
+    menu.append(&MenuItem::with_id(app, "open", "Открыть Mantis", true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "quit", "Выйти", true, None::<&str>)?)?;
+    Ok(menu)
+}
+
+fn update_tray(app: &AppHandle, s: &TrayStatus) -> tauri::Result<()> {
+    let Some(tray) = app.tray_by_id("main") else { return Ok(()) };
+    tray.set_menu(Some(tray_menu(app, s)?))?;
+    let mut tip = if s.running {
+        format!("Mantis — мониторинг идёт · сейчас {} чел.", s.people)
+    } else {
+        "Mantis — мониторинг остановлен".to_string()
+    };
+    if let Some(first) = s.lines.first() {
+        tip.push('\n');
+        tip.push_str(first);
+    }
+    // у подсказки значка Windows предел — 127 символов
+    let tip: String = tip.chars().take(120).collect();
+    tray.set_tooltip(Some(tip))?;
+    Ok(())
+}
+
+/// Команда из меню значка — странице (window.__mantisTray).
+fn tray_command(app: &AppHandle, cmd: &str) {
+    if cmd == "report" {
+        show_main(app);
+    }
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.eval(&format!("window.__mantisTray && window.__mantisTray({})", serde_json_string(cmd)));
+    }
+}
+
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "Открыть Mantis", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Выйти", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &quit])?;
+    let menu = tray_menu(app, &TrayStatus::default())?;
     let mut tray = TrayIconBuilder::with_id("main")
         .tooltip("Mantis — подсчёт посетителей")
         .menu(&menu)
@@ -265,6 +345,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, e| match e.id().as_ref() {
             "open" => show_main(app),
             "quit" => request_quit(app),
+            cmd @ ("start" | "stop" | "report") => tray_command(app, cmd),
             _ => {}
         })
         .on_tray_icon_event(|tray, e| {
@@ -281,19 +362,22 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
 pub fn run() {
     let keep = Arc::new(AtomicBool::new(false));
-    keep_awake_loop(keep.clone());
+    let keep_display = Arc::new(AtomicBool::new(true));
+    keep_awake_loop(keep.clone(), keep_display.clone());
 
     let app = tauri::Builder::default()
         // второй запуск (ярлык, автозапуск) — просто показать уже открытое окно
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--autostart"])))
         .manage(AppState {
             agent: Mutex::new(None),
             pilot_running: AtomicBool::new(false),
             keep_awake: keep,
+            keep_display,
             quitting: AtomicBool::new(false),
         })
-        .invoke_handler(tauri::generate_handler![app_info, keep_awake, set_autostart, pilot_state, quit_app])
+        .invoke_handler(tauri::generate_handler![app_info, keep_awake, set_autostart, pilot_state, quit_app, notify, tray_status])
         .setup(|app| {
             if let Some(w) = app.get_webview_window("main") {
                 allow_camera(&w);

@@ -3,6 +3,7 @@
 
 import { Analytics, type AnalyticsEvent, type Counters, type TrackSummary, footOf, heightOf } from "./analytics";
 import { ByteTracker, type RawDetection } from "./bytetrack";
+import { REID_WINDOW, TrackReID } from "./reid";
 import type { AnalyticsConfig } from "./config";
 import { type Box, type Pt, segmentsIntersect, toPixels } from "./geometry";
 import { type ExtendedMetrics, type TrackPoint, computeMetrics } from "./metrics";
@@ -18,6 +19,8 @@ export interface OverlayBox {
   speed: number | null;
   inZone: boolean;
   keypoints: RawDetection["keypoints"] | null;
+  /** Сотрудник — не считается (рамка серая). */
+  staff?: boolean;
 }
 
 export interface FrameResult {
@@ -40,6 +43,16 @@ export interface SessionReport {
   metrics: ExtendedMetrics;
 }
 
+/** Живой подсчёт (камера, мониторинг) — как LiveCameraEngine.swift на Mac. Для разбора видео не нужны. */
+export interface LiveOptions {
+  /** Склейка повторных треков (человек пропал на секунду и вернулся с новым номером). */
+  reid?: boolean;
+  /** Сотрудник: дольше стольких минут в кадре — не считается (и снимается уже засчитанное); null — считать всех. */
+  staffMinutes?: number | null;
+  /** Человек засчитывается в «людей в зоне», только пробыв в зоне столько секунд (minTrackSeconds). */
+  seenAfter?: number;
+}
+
 export class Session {
   readonly analytics: Analytics;
   readonly tracker = new ByteTracker();
@@ -57,6 +70,16 @@ export class Session {
   private maxSimultaneous = 0;
   private frames = 0;
   private firstT: number | null = null;
+  /** Отбор людей после трекера (неподвижные фигуры в пилоте); null — все. */
+  trackFilter: (<P extends { trackId: number; box: Box }>(people: P[], t: number) => P[]) | null = null;
+  private readonly reid: TrackReID | null;
+  private readonly staffIds = new Set<number>();
+  private readonly firstSeenAt = new Map<number, number>();
+  private readonly zoneSince = new Map<number, number>();
+  /** Сколько раз склеили треки (диагностика). */
+  get merged(): number {
+    return this.reid?.merged ?? 0;
+  }
 
   /** entrance — линия входа в долях кадра (null — вход не считаем). */
   constructor(
@@ -65,7 +88,16 @@ export class Session {
     readonly height: number,
     entrance: Pt[] | null,
     readonly fps: number,
+    readonly live: LiveOptions = {},
   ) {
+    if (live.reid) {
+      // трек держим дольше окна склейки — вернувшийся продолжит свою историю, а «притормозил» и «посмотрел»
+      // не засчитаются ему второй раз
+      cfg = structuredClone(cfg);
+      cfg.tracking.lostTimeoutSeconds = Math.max(cfg.tracking.lostTimeoutSeconds, REID_WINDOW + 1);
+      this.cfg = cfg;
+    }
+    this.reid = live.reid ? new TrackReID() : null;
     this.linePx = cfg.countLineEnabled ? toPixels(cfg.countLine, width, height) : [];
     this.zonePx = toPixels(cfg.showcaseZone, width, height);
     this.entrancePx = entrance && entrance.length === 2 ? toPixels(entrance, width, height) : null;
@@ -77,7 +109,9 @@ export class Session {
     if (this.firstT === null) this.firstT = t;
     this.frames += 1;
     const tracked = this.tracker.update(raw, this.width, this.height);
-    const people = tracked.map((o) => ({ trackId: o.trackId, box: o.box, keypoints: raw[o.detIndex]?.keypoints ?? null }));
+    const ids = this.reid ? this.reid.identities(tracked.map((o) => ({ trackId: o.trackId, box: o.box })), t) : null;
+    let people = tracked.map((o, i) => ({ trackId: ids ? ids[i] : o.trackId, box: o.box, keypoints: raw[o.detIndex]?.keypoints ?? null }));
+    if (this.trackFilter) people = this.trackFilter(people, t);
     const events = this.analytics.update(t, people);
 
     let inZoneNow = 0;
@@ -85,6 +119,21 @@ export class Session {
     for (const p of people) {
       const tr = this.analytics.tracks.get(p.trackId);
       if (!tr) continue;
+      // сотрудник: в кадре дольше заданного — снимаем засчитанное и больше не считаем
+      const staffMin = this.live.staffMinutes;
+      if (staffMin) {
+        const first = this.firstSeenAt.get(p.trackId) ?? t;
+        this.firstSeenAt.set(p.trackId, first);
+        if (!this.staffIds.has(p.trackId) && t - first >= staffMin * 60) {
+          this.staffIds.add(p.trackId);
+          this.analytics.markStaff(p.trackId);
+          if (this.seenIds.has(p.trackId)) this.seen = Math.max(0, this.seen - 1);
+        }
+        if (this.staffIds.has(p.trackId)) {
+          boxes.push({ trackId: p.trackId, box: p.box, state: "tracked", lookingNow: false, speed: tr.speed, inZone: false, keypoints: p.keypoints, staff: true });
+          continue;
+        }
+      }
       const foot = footOf(p.box);
       const traj = this.trajectories.get(p.trackId) ?? [];
       const prev = traj[traj.length - 1];
@@ -92,7 +141,9 @@ export class Session {
       this.trajectories.set(p.trackId, traj);
       if (tr.inZone) {
         inZoneNow += 1;
-        if (!this.seenIds.has(p.trackId)) {
+        const since = this.zoneSince.get(p.trackId) ?? t;
+        this.zoneSince.set(p.trackId, since);
+        if (!this.seenIds.has(p.trackId) && t - since >= (this.live.seenAfter ?? 0)) {
           this.seenIds.add(p.trackId);
           this.seen += 1;
         }
@@ -125,8 +176,19 @@ export class Session {
         this.trajectories.delete(id);
         this.enteredIds.delete(id);
         this.seenIds.delete(id);
+        this.staffIds.delete(id);
+        this.firstSeenAt.delete(id);
+        this.zoneSince.delete(id);
       } else if (traj.length > 600) {
         traj.splice(0, traj.length - 600);
+      }
+    }
+    // сотрудники и время в кадре — только для тех, кто ещё в кадре
+    for (const id of [...this.firstSeenAt.keys()]) {
+      if (!this.analytics.tracks.has(id)) {
+        this.firstSeenAt.delete(id);
+        this.staffIds.delete(id);
+        this.zoneSince.delete(id);
       }
     }
     if (this.events.length > 500) this.events.splice(0, this.events.length - 500);

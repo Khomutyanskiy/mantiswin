@@ -1,0 +1,160 @@
+/* Личный кабинет: шапка, план с людьми слева, сводка справа; на телефоне — друг под другом. */
+.cab { min-height: 100vh; display: flex; flex-direction: column; }
+.cab-muted { color: var(--muted); }
+.cab-ok { color: var(--ov-green); }
+.cab-error { color: var(--danger); min-height: 1.5em; margin: 0; }
+
+.cab-login {
+  width: min(380px, calc(100vw - 32px)); margin: 12vh auto 0; display: flex; flex-direction: column; gap: 12px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 28px;
+}
+.cab-login img { border-radius: 14px; align-self: flex-start; }
+.cab-login h1 { font-size: 24px; }
+.cab-login p { margin: 0; }
+.cab-login input, .cab-select {
+  background: var(--bg-2); border: 1px solid var(--line-2); border-radius: var(--r); padding: 11px 12px; min-width: 0;
+}
+
+.cab-head {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: calc(10px + env(safe-area-inset-top, 0px)) 16px 10px;
+  border-bottom: 1px solid var(--line); background: rgba(10, 18, 48, 0.85); backdrop-filter: blur(8px);
+  position: sticky; top: 0; z-index: 5;
+}
+.cab-brand { display: flex; align-items: center; gap: 10px; }
+.cab-brand img { border-radius: 8px; }
+.cab-brand span { display: flex; flex-direction: column; line-height: 1.15; }
+.cab-brand small { color: var(--muted); font-size: 12px; }
+.cab-select { max-width: 260px; }
+.cab-tabs { display: flex; gap: 4px; background: var(--bg-2); border: 1px solid var(--line); border-radius: 999px; padding: 3px; }
+.cab-tab { border: 0; background: transparent; color: var(--muted); padding: 7px 14px; border-radius: 999px; cursor: pointer; font-weight: 600; }
+.cab-tab[aria-current="page"] { background: var(--line-2); color: var(--fg); }
+.cab-user { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.cab-banner { background: rgba(255, 122, 102, 0.12); color: var(--danger); border-bottom: 1px solid rgba(255, 122, 102, 0.3); padding: 8px 16px; font-size: 14px; }
+
+.cab-body { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; padding: 16px; min-height: 0; }
+.cab-stage { background: var(--bg-2); border: 1px solid var(--line); border-radius: 16px; min-height: 420px; overflow: hidden; display: flex; }
+.cab-canvas { width: 100%; height: 100%; min-height: 420px; display: block; }
+.cab-empty { margin: auto; max-width: 460px; padding: 32px 20px; text-align: center; display: flex; flex-direction: column; gap: 12px; align-items: center; }
+.cab-empty h2 { font-size: 20px; }
+.cab-empty p { margin: 0; }
+
+.cab-side { display: flex; flex-direction: column; gap: 12px; }
+.cab-side h3 { margin: 8px 0 0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.cab-status { display: flex; gap: 10px; align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px; }
+.cab-status > i { width: 10px; height: 10px; border-radius: 50%; background: var(--faint); flex: none; }
+.cab-status.on > i { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); animation: pulse 1.2s infinite alternate; }
+.cab-status.off > i { background: var(--danger); }
+.cab-status div { display: flex; flex-direction: column; min-width: 0; }
+.cab-status small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cab-now { display: flex; align-items: baseline; gap: 10px; }
+.cab-big { font-size: 44px; font-weight: 700; line-height: 1; }
+.cab-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.cab-stat { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; }
+.cab-stat b { font-size: 22px; line-height: 1.2; }
+.cab-stat span { color: var(--muted); font-size: 13px; }
+.cab-stat small { color: var(--faint); font-size: 12px; }
+.cab-stat.slowed b { color: #30d158; }
+.cab-stat.looked b { color: #ffd60a; }
+.cab-stat.entered b { color: #8fa6ff; }
+.cab-stat.turned b { color: #ff9a3c; }
+.cab-cams { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.cab-cams li { display: flex; align-items: center; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 9px 12px; }
+.cab-cams li > i { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
+.cab-cams li > i.on { background: var(--accent); }
+.cab-cams li > i.idle { background: var(--ov-yellow); }
+.cab-cams li > i.off { background: var(--danger); }
+.cab-cams li div { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.cab-cams li small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.cab-editor { grid-column: 1 / -1; min-height: 70vh; }
+.cab-row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+
+@media (max-width: 860px) {
+  .cab-body { grid-template-columns: 1fr; padding: 12px; }
+  .cab-stage, .cab-canvas { min-height: 56vh; }
+  .cab-user { width: 100%; justify-content: space-between; margin-left: 0; }
+  .cab-select { max-width: none; flex: 1; }
+}
+
+/* раздел «Точки» внутри приложения */
+.cab-embedded { min-height: 100vh; }
+.cab-embedded .cab-head { background: var(--bg); }
+.cab-label { color: var(--muted); font-size: 13px; font-weight: 600; }
+.cab-embedded > .cab-empty { margin: 14vh auto 0; }
+.cab-stage-col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.cab-stage-col .cab-stage { flex: 1; }
+.cab-legend { padding: 0 4px; }
+
+/* выбор точки — свой список */
+.cab-pick { position: relative; }
+.cab-pick-btn {
+  display: inline-flex; align-items: center; gap: 9px; min-width: 150px; max-width: 280px;
+  background: var(--bg-2); border: 1px solid var(--line-2); border-radius: 999px; padding: 8px 14px 8px 12px;
+  color: var(--fg); font: inherit; font-weight: 600; cursor: pointer;
+}
+.cab-pick-btn:hover, .cab-pick-btn[aria-expanded="true"] { border-color: var(--accent); }
+.cab-pick-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; text-align: left; }
+.cab-pick-chev { color: var(--muted); font-size: 11px; transition: transform 0.15s; }
+.cab-pick-btn[aria-expanded="true"] .cab-pick-chev { transform: rotate(180deg); }
+.cab-pick-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: transparent; box-shadow: inset 0 0 0 1.5px var(--muted); }
+.cab-pick-dot.on { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.cab-pick-menu {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; min-width: 260px; max-width: 360px; max-height: 60vh; overflow: auto;
+  background: var(--panel); border: 1px solid var(--line-2); border-radius: 14px; padding: 6px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45); display: flex; flex-direction: column; gap: 2px;
+}
+.cab-pick-item {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; border: 0; background: transparent; color: var(--fg);
+  font: inherit; padding: 9px 10px; border-radius: 10px; cursor: pointer;
+}
+.cab-pick-item:hover { background: var(--bg-2); }
+.cab-pick-item[aria-selected="true"] { background: var(--accent-soft); }
+.cab-pick-text { display: flex; flex-direction: column; min-width: 0; }
+.cab-pick-text b { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cab-pick-text small { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* нет трансляции */
+.cab-nolive { max-width: 520px; }
+.cab-nolive-ico {
+  width: 56px; height: 56px; border-radius: 50%; border: 2px solid var(--line-2); position: relative; margin-bottom: 4px;
+}
+.cab-nolive-ico::before, .cab-nolive-ico::after { content: ""; position: absolute; left: 50%; top: 50%; border-radius: 50%; transform: translate(-50%, -50%); }
+.cab-nolive-ico::before { width: 12px; height: 12px; background: var(--muted); }
+.cab-nolive-ico::after { width: 30px; height: 30px; border: 2px solid var(--muted); opacity: 0.45; }
+
+/* «Камеры»: шаги сверху, камеры по устройствам, у каждой — статус, что есть и что сделать */
+.cab-campage { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.cab-cams-intro { display: flex; flex-wrap: wrap; gap: 14px 28px; align-items: flex-start; justify-content: space-between;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 16px 18px; }
+.cab-cams-intro h2 { font-size: 18px; margin: 0 0 4px; }
+.cab-cams-intro p { margin: 0; }
+.cab-steps { margin: 0; padding: 0; list-style: none; counter-reset: st; display: flex; flex-direction: column; gap: 8px; max-width: 560px; }
+.cab-steps li { counter-increment: st; display: grid; grid-template-columns: 22px 1fr; column-gap: 10px; row-gap: 1px; font-size: 13px; align-items: start; }
+.cab-steps li b { grid-column: 2; }
+.cab-steps li span { grid-column: 2; }
+.cab-steps li::before { content: counter(st); grid-row: span 2; width: 22px; height: 22px; border-radius: 50%; background: var(--line-2); color: var(--fg); display: grid; place-items: center; font-weight: 700; font-size: 12px; }
+.cab-note { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 14px; border-radius: 12px; background: rgba(255, 210, 63, 0.1); border: 1px solid rgba(255, 210, 63, 0.35); }
+.cab-dev { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.cab-dev b { font-size: 15px; }
+.cab-cam-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; align-items: start; }
+.cab-cam { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; display: flex; flex-direction: column; }
+.cab-cam.ok { border-color: rgba(48, 209, 88, 0.45); }
+.cab-thumb { position: relative; aspect-ratio: 16 / 9; background: #000; display: grid; place-items: center; overflow: hidden; }
+.cab-thumb > span.cab-muted { padding: 0 16px; text-align: center; }
+.cab-thumb-img { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.cab-badge { position: absolute; top: 10px; left: 10px; font-size: 12px; font-weight: 700; padding: 4px 9px; border-radius: 999px; }
+.cab-badge.ok { background: #30d158; color: #062b12; }
+.cab-badge.todo { background: #ffd60a; color: #2b2400; }
+.cab-badge.wait { background: rgba(255, 255, 255, 0.14); color: var(--fg); }
+.cab-frame-at { position: absolute; right: 10px; bottom: 8px; font-size: 11px; color: rgba(255, 255, 255, 0.75); background: rgba(0, 0, 0, 0.5); padding: 2px 7px; border-radius: 6px; }
+.cab-cam-info { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 6px; }
+.cab-cam-name { font-size: 16px; }
+.cab-cam-steps { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.cab-cam-steps li { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; }
+.cab-cam-steps li i { width: 18px; height: 18px; border-radius: 50%; flex: none; border: 1.5px solid var(--muted); display: grid; place-items: center; font-style: normal; font-size: 11px; font-weight: 800; margin-top: 1px; }
+.cab-cam-steps li.done i { background: #30d158; border-color: #30d158; color: #062b12; }
+.cab-cam-steps li span { display: flex; flex-direction: column; gap: 2px; }
+.cab-cam-steps li.done b { color: var(--muted); font-weight: 600; }
+.cab-forget { margin-left: auto; color: var(--muted); font-size: 13px; }
+.cab-forget:hover { color: var(--danger); }

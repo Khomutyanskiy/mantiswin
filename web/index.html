@@ -2,6 +2,10 @@
 <html lang="ru">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      // Открыли по адресу без «/» на конце (…/app/mantis) — добавляем: иначе модель и файлы ищутся уровнем выше.
+      if (!/\/$|\.[a-z0-9]+$/i.test(location.pathname)) location.replace(location.pathname + "/" + location.search + location.hash);
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#0b1330" />
@@ -11,24 +15,32 @@
     <link rel="apple-touch-icon" href="./icon-192.png" />
   </head>
   <body>
-    <header class="topbar">
+    <aside class="topbar sidebar" id="sidebar">
       <a class="brand" href="./" aria-label="Mantis — в начало">
-        <img src="./icon-192.png" alt="" width="36" height="36" />
-        <span class="brand-name">Mantis</span>
-        <span class="brand-sub">аналитика витрины</span>
+        <img src="./icon-192.png" alt="" width="34" height="34" />
+        <span class="brand-text"><span class="brand-name">Mantis</span><span class="brand-sub">Аналитика витрины</span></span>
       </a>
-      <nav class="tabs" aria-label="Режим">
-        <button type="button" class="tab" data-tab="check" aria-current="page">Проверка видео</button>
-        <button type="button" class="tab" data-tab="pilot">Пилот</button>
-        <button type="button" class="tab" data-tab="stats">Статистика</button>
+      <nav class="tabs sb-nav" aria-label="Разделы">
+        <button type="button" class="tab sb-item" data-tab="monitoring" title="Мониторинг"><svg class="sb-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2.2" class="f"/><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14"/></svg><span class="sb-label">Мониторинг</span><i class="sb-live" id="sb-live" hidden></i></button>
+        <button type="button" class="tab sb-item" data-tab="sites" title="Онлайн — двойник любой точки из облака"><svg class="sb-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-6.5-5.6-6.5-11A6.5 6.5 0 0 1 18.5 10c0 5.4-6.5 11-6.5 11z"/><circle cx="12" cy="10" r="2.3"/></svg><span class="sb-label">Онлайн</span></button>
+        <button type="button" class="tab sb-item" data-tab="check" title="Анализ видео"><svg class="sb-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="13" height="14" rx="2"/><path d="M16 10l5-3v10l-5-3"/></svg><span class="sb-label">Анализ</span></button>
+        <button type="button" class="tab sb-item" data-tab="stats" title="Статистика"><svg class="sb-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M21 20H3"/></svg><span class="sb-label">Статистика</span></button>
+        <button type="button" class="tab sb-item" data-tab="records" title="Записи" hidden><svg class="sb-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="14" height="12" rx="2"/><path d="M7 3h12a2 2 0 0 1 2 2v10"/><path d="M8.5 9.5v5l4-2.5z" class="f"/></svg><span class="sb-label">Записи</span></button>
+        <button type="button" class="sb-item" id="btn-account" title="Профиль"><svg class="sb-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.2-4 4.3-6 8-6s6.8 2 8 6"/></svg><span class="sb-label" id="account-label">Профиль</span><span class="avatar" aria-hidden="true"></span></button>
+        <button type="button" class="tab sb-item" data-tab="settings" title="Настройки"><svg class="sb-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v2.2M12 19.3v2.2M4.6 4.6l1.6 1.6M17.8 17.8l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.6 19.4l1.6-1.6M17.8 6.2l1.6-1.6"/><circle cx="12" cy="12" r="6.5"/></svg><span class="sb-label">Настройки</span></button>
+        <button type="button" class="tab sb-item" data-tab="help" title="Справка"><svg class="sb-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 1 1 3.6 2.3c-.8.4-1.2 1-1.2 1.9v.5"/><circle cx="12" cy="17" r=".6" class="f"/></svg><span class="sb-label">Справка</span></button>
+        <button type="button" class="tab sb-item" data-tab="about" title="О приложении"><svg class="sb-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><circle cx="12" cy="7.5" r=".7" class="f"/></svg><span class="sb-label">О приложении</span></button>
+        <button type="button" class="tab sb-item" data-tab="demo" title="Демо"><svg class="sb-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M18.5 15.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg><span class="sb-label">Демо</span></button>
       </nav>
-      <div class="top-right">
+      <div class="sb-foot">
         <div class="engine" id="engine" data-state="idle" title="Нейросеть">
-          <span class="dot" aria-hidden="true"></span><span id="engine-text">Нейросеть не загружена</span>
+          <span class="dot" aria-hidden="true"></span><span id="engine-text" class="sb-label">Нейросеть не загружена</span>
         </div>
-        <button class="account-btn" id="btn-account" type="button"><span class="avatar" aria-hidden="true"></span><span id="account-label">Войти</span></button>
+        <button type="button" class="sb-item sb-collapse" id="sb-collapse" title="Свернуть меню"><svg class="sb-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 6l-6 6 6 6M19 6l-6 6 6 6"/></svg><span class="sb-label">Свернуть меню</span></button>
       </div>
-    </header>
+    </aside>
+
+    <div id="tip-bar" hidden></div>
 
     <main class="layout">
       <!-- Сцена: видео, разметка, наложение -->
@@ -177,6 +189,8 @@
           </div>
           <div class="actions" id="done-actions" hidden>
             <button class="btn primary wide" id="btn-remark" type="button">Изменить разметку и пересчитать</button>
+            <button class="btn wide" id="btn-twin" type="button" hidden>Цифровой двойник: люди на плане</button>
+            <button class="btn wide" id="btn-heat" type="button" hidden>Тепловая карта</button>
             <button class="btn ghost wide" id="btn-new" type="button">Другое видео</button>
           </div>
         </div>
@@ -254,6 +268,10 @@
       </section>
     </main>
 
+    <!-- Статистика: последний запуск · отчёты · по часам и дням · записи двойника (как StatsHubView на Mac) -->
+    <div class="hub-bar" id="stats-hub" hidden></div>
+    <div class="sample-banner" id="sample-banner" hidden><span>✦</span><div><b>Показан пример данных</b><small>2 недели по двум камерам и 5 отчётов — только на этом компьютере, в облако не уходят. Настоящие данные не тронуты.</small></div><button type="button" class="btn small" id="sample-hide">Убрать пример</button></div>
+    <section class="reports-view" id="reports-view" hidden aria-label="Отчёты"></section>
     <!-- Статистика -->
     <section class="stats" id="stats" hidden aria-label="Статистика">
       <div class="stats-head">
@@ -267,17 +285,39 @@
             <label><input type="radio" name="period" value="30" /><span>30 дней</span></label>
             <label><input type="radio" name="period" value="0" /><span>Всё время</span></label>
           </div>
+          <button class="btn small" id="btn-stats-excel" type="button" title="Выгрузить статистику по часам за период в Excel — файл CSV">В Excel</button>
           <button class="btn small" id="btn-stats-refresh" type="button">Обновить</button>
         </div>
       </div>
+      <div class="chips" id="stats-camera" role="radiogroup" aria-label="Камера" hidden></div>
       <div class="chips" id="stats-metric" role="radiogroup" aria-label="Показатель"></div>
       <div class="devices" id="devices"></div>
       <div id="stats-cameras" hidden></div>
       <div id="stats-body"></div>
+      <div id="stats-compare"></div>
     </section>
 
-    <!-- Пилот на нескольких камерах (настольная версия: Windows) -->
-    <section class="multi" id="multi" hidden aria-label="Пилот"></section>
+    <!-- Мониторинг: 1 · Камеры → 2 · План → 3 · Мониторинг (как в Mantis для Mac) -->
+    <section class="monitoring" id="monitoring" hidden aria-label="Мониторинг">
+      <div class="mon-head" id="mon-head"></div>
+      <section class="multi" id="multi" hidden aria-label="Камеры"></section>
+      <section class="plan-step" id="plan-step" hidden aria-label="План точки"></section>
+      <section class="twin" id="twin" hidden aria-label="Мониторинг"></section>
+    </section>
+
+    <!-- Точки: все точки аккаунта вживую (то же, что личный кабинет) -->
+    <section id="sites" hidden aria-label="Точки"></section>
+
+    <!-- Демо: свой план и придуманные прохожие -->
+    <section class="demo" id="demo" hidden aria-label="Демо"></section>
+
+    <!-- Справка и «О приложении» -->
+    <section class="help" id="help" hidden aria-label="Справка"></section>
+    <section class="about" id="about" hidden aria-label="О приложении"></section>
+    <section id="settings" hidden aria-label="Настройки"></section>
+
+    <!-- Записи двойника -->
+    <section class="records" id="records" hidden aria-label="Записи"></section>
 
     <!-- Аккаунт -->
     <dialog class="dialog" id="account-dialog" aria-labelledby="account-title">
@@ -311,6 +351,16 @@
             <label>Покупают из посмотревших, %<input id="pf-look" type="number" min="0" max="100" step="0.5" /></label>
             <label>Покупают из вошедших, %<input id="pf-enter" type="number" min="0" max="100" step="1" /></label>
           </div>
+          <section class="twin-cloud" aria-label="Цифровой двойник в облаке">
+            <div class="row-between">
+              <p class="eyebrow">Цифровой двойник в облаке</p>
+              <label class="tc-switch"><input type="checkbox" class="switch" id="tc-enabled" /> <span class="small">Передавать</span></label>
+            </div>
+            <p class="tc-status"><i id="tc-dot"></i><span id="tc-status"></span></p>
+            <label class="field-label" for="tc-site">Код точки</label>
+            <input class="input" id="tc-site" type="text" placeholder="main" autocomplete="off" autocapitalize="off" spellcheck="false" />
+            <p class="hint-small">Раз в секунду — люди на плане, камеры и счётчики за сегодня, как приложение на iPhone. Все точки вживую — в разделе «Точки» слева (и в <a id="tc-cabinet" href="./cabinet.html" target="_blank" rel="noopener">личном кабинете</a> для руководителя). План точки общий с кабинетом. Если магазинов несколько — на каждом свой код, например «sadovaya». Видео никуда не уходит.</p>
+          </section>
           <p class="form-error" id="profile-error" hidden></p>
           <div class="actions">
             <button class="btn primary wide" id="btn-profile-save" type="button">Сохранить</button>
